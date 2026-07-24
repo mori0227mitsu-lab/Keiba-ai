@@ -24,7 +24,7 @@ from sklearn.preprocessing import LabelEncoder
 CATEGORICAL_COLS = ["venue", "track_type", "condition", "sex", "jockey"]
 FEATURE_COLS = [
     "venue", "distance", "waku", "age", "weight_carry", "horse_weight",
-    "weight_diff", "prev_rank", "rest_weeks", "popularity", "odds",
+    "weight_diff", "prev_rank", "rest_weeks", "popularity",
     "track_type", "condition", "sex", "jockey",
 ]
 TARGET_COL = "is_top3"
