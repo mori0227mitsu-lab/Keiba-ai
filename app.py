@@ -133,6 +133,38 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def compute_custom_score(df: pd.DataFrame, weights: dict) -> pd.Series:
+    """ユーザーが指定した重視度(0〜100)に基づいて、独自の合計スコアを計算する。
+
+    各項目は「良いほうが高くなる」向きに0〜1へ正規化してから重み付けする。
+    prev_rank=0(前走不明)の馬は、その項目だけ中立(0.5)として扱う。
+    """
+    def normalize_lower_is_better(series: pd.Series, neutral_mask: pd.Series = None) -> pd.Series:
+        s = series.astype(float).copy()
+        if neutral_mask is not None:
+            valid = s[~neutral_mask]
+        else:
+            valid = s
+        if len(valid) == 0 or valid.max() == valid.min():
+            result = pd.Series(0.5, index=s.index)
+        else:
+            result = 1 - (s - valid.min()) / (valid.max() - valid.min())
+            result = result.clip(0, 1)
+        if neutral_mask is not None:
+            result[neutral_mask] = 0.5
+        return result
+
+    prev_rank_unknown = df["prev_rank"] == 0
+
+    scores = pd.Series(0.0, index=df.index)
+    total_weight = sum(weights.values()) or 1
+    scores += weights.get("popularity", 0) * normalize_lower_is_better(df["popularity"])
+    scores += weights.get("prev_rank", 0) * normalize_lower_is_better(df["prev_rank"], prev_rank_unknown)
+    scores += weights.get("weight_carry", 0) * normalize_lower_is_better(df["weight_carry"])
+    scores += weights.get("weight_diff", 0) * normalize_lower_is_better(df["weight_diff"].abs())
+    return (scores / total_weight * 100).round(1)
+
+
 @st.cache_resource
 def load_model(_feature_hash: str):
     """毎回その場で学習してモデルを作る(保存済みmodel.joblibは使わない)。
@@ -247,6 +279,20 @@ def main():
         key=f"horse_table_{st.session_state.horse_table_version}",
     )
 
+    with st.expander("🎚 あなたの重視ポイントを設定する(任意)"):
+        st.caption(
+            "各項目をどれくらい重視するかを0〜100で指定できます。"
+            "AIの予測(過去データからの学習結果)とは別に、"
+            "あなた独自の基準でも順位をつけられます。"
+        )
+        wcol1, wcol2 = st.columns(2)
+        with wcol1:
+            w_popularity = st.slider("人気を重視する", 0, 100, 50)
+            w_prev_rank = st.slider("前走着順を重視する", 0, 100, 30)
+        with wcol2:
+            w_weight_carry = st.slider("斤量の軽さを重視する", 0, 100, 20)
+            w_weight_diff = st.slider("馬体重の安定を重視する(増減が少ない馬を評価)", 0, 100, 20)
+
     if st.button("予測する", type="primary"):
         if edited.empty:
             st.warning("出走馬の情報を入力してください。")
@@ -261,9 +307,18 @@ def main():
         X, _ = build_features(df, encoders=bundle["encoders"])
         proba = bundle["model"].predict_proba(X)[:, 1]
 
+        custom_weights = {
+            "popularity": w_popularity,
+            "prev_rank": w_prev_rank,
+            "weight_carry": w_weight_carry,
+            "weight_diff": w_weight_diff,
+        }
+        custom_score = compute_custom_score(edited, custom_weights)
+
         result = edited[["horse_num", "waku", "jockey", "popularity", "odds"]].copy()
-        result["複勝確率(3着以内)"] = (proba * 100).round(1)
-        result = result.sort_values("複勝確率(3着以内)", ascending=False).reset_index(drop=True)
+        result["AI複勝確率(%)"] = (proba * 100).round(1)
+        result["あなたのスコア"] = custom_score
+        result = result.sort_values("あなたのスコア", ascending=False).reset_index(drop=True)
         result.index = result.index + 1
         result = result.rename(columns={
             "horse_num": "馬番", "waku": "枠番", "jockey": "騎手",
@@ -271,8 +326,9 @@ def main():
         })
 
         st.subheader("③ 予測結果")
+        st.caption("「あなたのスコア」順に並んでいます。AIの予測確率も参考に表示しています。")
         st.dataframe(result, use_container_width=True)
-        st.bar_chart(result.set_index("馬番")["複勝確率(3着以内)"])
+        st.bar_chart(result.set_index("馬番")[["AI複勝確率(%)", "あなたのスコア"]])
 
         st.caption(
             "⚠️ このアプリはあくまで学習・娯楽目的の予測ツールです。"
