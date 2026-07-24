@@ -21,9 +21,9 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
-CATEGORICAL_COLS = ["track_type", "condition", "sex", "jockey"]
+CATEGORICAL_COLS = ["venue", "track_type", "condition", "sex", "jockey"]
 FEATURE_COLS = [
-    "distance", "waku", "age", "weight_carry", "horse_weight",
+    "venue", "distance", "waku", "age", "weight_carry", "horse_weight",
     "weight_diff", "prev_rank", "rest_weeks", "popularity", "odds",
     "track_type", "condition", "sex", "jockey",
 ]
