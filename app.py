@@ -19,10 +19,7 @@ from model.train_model import build_features
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "model.joblib")
 
-JOCKEYS = [
-    "C.ルメール", "川田将雅", "武豊", "戸崎圭太", "横山武史",
-    "福永祐一", "坂井瑠星", "松山弘平", "池添謙一", "岩田望来",
-]
+VENUES = ["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]
 
 DEFAULT_ROWS = pd.DataFrame([
     {"horse_num": 1, "waku": 1, "sex": "牡", "age": 4, "jockey": "C.ルメール",
@@ -73,7 +70,9 @@ def main():
         bundle = load_model()
 
     st.subheader("① レース条件")
-    col1, col2, col3 = st.columns(3)
+    col0, col1, col2, col3 = st.columns(4)
+    with col0:
+        venue = st.selectbox("開催場", VENUES)
     with col1:
         distance = st.number_input("距離(m)", min_value=1000, max_value=3600, value=1600, step=100)
     with col2:
@@ -93,7 +92,7 @@ def main():
             "waku": st.column_config.NumberColumn("枠番", min_value=1, max_value=8, step=1),
             "sex": st.column_config.SelectboxColumn("性別", options=["牡", "牝", "セ"]),
             "age": st.column_config.NumberColumn("馬齢", min_value=2, max_value=10, step=1),
-            "jockey": st.column_config.SelectboxColumn("騎手", options=JOCKEYS),
+            "jockey": st.column_config.TextColumn("騎手", help="騎手名を直接入力してください"),
             "weight_carry": st.column_config.NumberColumn("斤量", min_value=48.0, max_value=64.0, step=0.5),
             "horse_weight": st.column_config.NumberColumn("馬体重", min_value=350, max_value=600, step=1),
             "weight_diff": st.column_config.NumberColumn("体重増減", min_value=-30, max_value=30, step=1),
@@ -111,6 +110,7 @@ def main():
             return
 
         df = edited.copy()
+        df["venue"] = venue
         df["distance"] = distance
         df["track_type"] = track_type
         df["condition"] = condition
