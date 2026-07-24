@@ -9,6 +9,7 @@
 各馬の「複勝(3着以内)確率」を予測してランキング表示します。
 """
 
+import hashlib
 import io
 import os
 import re
@@ -17,7 +18,9 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-from model.train_model import build_features
+from model.train_model import FEATURE_COLS, build_features
+
+FEATURE_HASH = hashlib.md5(",".join(FEATURE_COLS).encode()).hexdigest()[:8]
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "model.joblib")
 
@@ -131,9 +134,11 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
 
 
 @st.cache_resource
-def load_model():
+def load_model(_feature_hash: str):
     """毎回その場で学習してモデルを作る(保存済みmodel.joblibは使わない)。
 
+    引数の_feature_hashは、特徴量セット(FEATURE_COLS)が変わった時に
+    自動でキャッシュを無効化するための仕組み(値そのものは使わない)。
     ファイルに保存したモデルを使い回す方式だと、列構成を変更した時に
     古いモデルとズレて壊れる(KeyErrorなど)ため、st.cache_resourceの
     キャッシュだけに頼る。
@@ -141,7 +146,7 @@ def load_model():
     誤って上書きしないよう、無い時だけダミーデータを生成する。
     """
     from data.generate_dummy_data import generate
-    from model.train_model import train, FEATURE_COLS
+    from model.train_model import train
 
     needs_regen = True
     if os.path.exists(DATA_PATH):
@@ -166,7 +171,7 @@ def main():
     )
 
     with st.spinner("モデルを準備しています(初回のみ数秒かかります)..."):
-        bundle = load_model()
+        bundle = load_model(FEATURE_HASH)
 
     st.subheader("① レース条件")
     col0, col1, col2, col3 = st.columns(4)
