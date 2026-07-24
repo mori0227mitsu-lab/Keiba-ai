@@ -11,6 +11,7 @@
 
 import io
 import os
+import re
 
 import joblib
 import pandas as pd
@@ -42,6 +43,51 @@ HORSE_TABLE_COLS = [
     "horse_weight", "weight_diff", "prev_rank", "rest_weeks",
     "popularity", "odds",
 ]
+
+
+NETKEIBA_SHUTUBA_PATTERN = re.compile(
+    r"(?P<waku>\d{1,2})\t(?P<horse_num>\d{1,2})\t\s*\n"
+    r"--\s*\n"
+    r"(?P<name>[^\n]+)\n"
+    r"(?P<sex>[牡牝セ])(?P<age>\d{1,2})\t(?P<weight_carry>[\d.]+)\t"
+    r"(?P<jockey>[^\t\n]+)\t(?P<stable>[^\t\n]+)\t"
+    r"(?P<horse_weight>\d{2,3})\((?P<weight_diff>[+-]?\d+)\)\t"
+    r"(?P<odds>[\d.]+)\t(?P<popularity>\d{1,2})\t"
+)
+
+
+def parse_netkeiba_shutuba(text: str) -> pd.DataFrame:
+    """netkeibaの出馬表ページをそのままコピペした生テキストを解析する。
+
+    (騎手名の先頭についた▲△★☆などの斤量減量マークはそのまま残す)
+    ページのレイアウトが変わると解析できなくなる可能性があるので、
+    その場合はエラーメッセージを出してCSV貼り付けにフォールバックしてもらう。
+    """
+    matches = list(NETKEIBA_SHUTUBA_PATTERN.finditer(text))
+    if not matches:
+        raise ValueError(
+            "出馬表の形式を認識できませんでした。ページのレイアウトが"
+            "想定と違う可能性があります。CSV貼り付けの方をお試しください。"
+        )
+
+    rows = []
+    for m in matches:
+        d = m.groupdict()
+        rows.append({
+            "horse_num": int(d["horse_num"]),
+            "waku": int(d["waku"]),
+            "sex": d["sex"],
+            "age": int(d["age"]),
+            "jockey": d["jockey"],
+            "weight_carry": float(d["weight_carry"]),
+            "horse_weight": int(d["horse_weight"]),
+            "weight_diff": int(d["weight_diff"]),
+            "prev_rank": 0,
+            "rest_weeks": 0,
+            "popularity": int(d["popularity"]),
+            "odds": float(d["odds"]),
+        })
+    return pd.DataFrame(rows)[HORSE_TABLE_COLS]
 
 
 def parse_pasted_csv(text: str) -> pd.DataFrame:
@@ -140,21 +186,38 @@ def main():
     if "horse_table_version" not in st.session_state:
         st.session_state.horse_table_version = 0
 
-    with st.expander("💡 CSVを貼り付けて一括入力する(手入力の手間を減らせます)"):
-        st.caption(
-            "ヘッダー行付きのCSVを貼り付けてください。列は "
-            "horse_num, waku, sex, age, jockey, weight_carry, horse_weight, "
-            "weight_diff, prev_rank, rest_weeks, popularity, odds "
-            "の一部だけでもOKです(無い列は既定値で埋めます)。"
-        )
-        pasted = st.text_area("CSVテキスト", height=120, key="csv_paste")
-        if st.button("表に反映"):
-            try:
-                st.session_state.horse_df = parse_pasted_csv(pasted)
-                st.session_state.horse_table_version += 1
-                st.success(f"{len(st.session_state.horse_df)}頭分を表に反映しました。")
-            except Exception as e:
-                st.error(f"読み込みに失敗しました: {e}")
+    with st.expander("💡 出走馬をまとめて入力する(手入力の手間を減らせます)", expanded=True):
+        tab1, tab2 = st.tabs(["netkeibaの出馬表を貼り付け", "CSVを貼り付け"])
+
+        with tab1:
+            st.caption(
+                "netkeibaアプリ/サイトの「出馬表」ページで、表の部分を選択してコピーし、"
+                "そのままここに貼り付けてください。"
+            )
+            raw_pasted = st.text_area("netkeiba出馬表", height=150, key="raw_paste")
+            if st.button("表に反映", key="raw_apply"):
+                try:
+                    st.session_state.horse_df = parse_netkeiba_shutuba(raw_pasted)
+                    st.session_state.horse_table_version += 1
+                    st.success(f"{len(st.session_state.horse_df)}頭分を表に反映しました。")
+                except Exception as e:
+                    st.error(str(e))
+
+        with tab2:
+            st.caption(
+                "ヘッダー行付きのCSVを貼り付けてください。列は "
+                "horse_num, waku, sex, age, jockey, weight_carry, horse_weight, "
+                "weight_diff, prev_rank, rest_weeks, popularity, odds "
+                "の一部だけでもOKです(無い列は既定値で埋めます)。"
+            )
+            pasted = st.text_area("CSVテキスト", height=120, key="csv_paste")
+            if st.button("表に反映", key="csv_apply"):
+                try:
+                    st.session_state.horse_df = parse_pasted_csv(pasted)
+                    st.session_state.horse_table_version += 1
+                    st.success(f"{len(st.session_state.horse_df)}頭分を表に反映しました。")
+                except Exception as e:
+                    st.error(f"読み込みに失敗しました: {e}")
 
     st.caption("表を直接編集できます。行の追加・削除も可能です。")
 
