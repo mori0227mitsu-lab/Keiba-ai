@@ -12,6 +12,8 @@ dummy_races.csv と同じ列構成のCSVを用意すれば
 import numpy as np
 import pandas as pd
 
+from course_info import COURSE_STRAIGHT_LENGTH, DAY_BIAS_OPTIONS, RUNNING_STYLES, VENUES
+
 RNG = np.random.default_rng(42)
 
 JOCKEYS = [
@@ -23,7 +25,6 @@ JOCKEYS = [
 
 TRACK_TYPES = ["芝", "ダート"]
 CONDITIONS = ["良", "稍重", "重", "不良"]
-VENUES = ["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]
 
 N_RACES = 60          # ダミーで作るレース数
 HORSES_PER_RACE = 12  # 1レースあたりの出走頭数
@@ -34,6 +35,8 @@ def make_race(race_id: int) -> pd.DataFrame:
     track_type = RNG.choice(TRACK_TYPES, p=[0.6, 0.4])
     condition = RNG.choice(CONDITIONS, p=[0.55, 0.25, 0.15, 0.05])
     venue = RNG.choice(VENUES)
+    straight_length = COURSE_STRAIGHT_LENGTH[venue]
+    day_bias = RNG.choice(DAY_BIAS_OPTIONS)
 
     rows = []
     # レースごとの「隠れた強さ」を割り振り、それに基づいて着順を生成する
@@ -45,6 +48,7 @@ def make_race(race_id: int) -> pd.DataFrame:
         sex = RNG.choice(["牡", "牝", "セ"], p=[0.5, 0.4, 0.1])
         age = int(RNG.choice([3, 4, 5, 6, 7], p=[0.25, 0.3, 0.25, 0.15, 0.05]))
         jockey, jockey_base_win_rate = JOCKEYS[RNG.integers(0, len(JOCKEYS))]
+        running_style = RNG.choice(RUNNING_STYLES, p=[0.15, 0.35, 0.35, 0.15])
         weight_carry = float(RNG.integers(52, 59))
         horse_weight = int(RNG.integers(420, 520))
         weight_diff = int(RNG.integers(-10, 11))
@@ -53,12 +57,24 @@ def make_race(race_id: int) -> pd.DataFrame:
         popularity = horse_num  # 後で強さに応じて振り直す
         odds = round(float(RNG.uniform(1.5, 50.0)), 1)
 
-        # 隠れた強さに、騎手の実力・斤量・前走成績などを少し反映
+        # 当日の傾向と脚質の相性(例: 先行有利の日は逃げ・先行馬が少し有利)
+        style_bonus = 0.0
+        if day_bias == "先行有利" and running_style in ("逃げ", "先行"):
+            style_bonus = 0.4
+        elif day_bias == "差し有利" and running_style in ("差し", "追い込み"):
+            style_bonus = 0.4
+        elif day_bias == "内有利" and waku <= 3:
+            style_bonus = 0.2
+        elif day_bias == "外有利" and waku >= 6:
+            style_bonus = 0.2
+
+        # 隠れた強さに、騎手の実力・斤量・前走成績・当日傾向との相性を反映
         strength = (
             true_strength[i]
             + jockey_base_win_rate * 2.0
             - (weight_carry - 55) * 0.05
             - (prev_rank - 5) * 0.05
+            + style_bonus
             + RNG.normal(0, 0.3)
         )
 
@@ -68,11 +84,14 @@ def make_race(race_id: int) -> pd.DataFrame:
             "distance": distance,
             "track_type": track_type,
             "condition": condition,
+            "straight_length": straight_length,
+            "day_bias": day_bias,
             "horse_num": horse_num,
             "waku": waku,
             "sex": sex,
             "age": age,
             "jockey": jockey,
+            "running_style": running_style,
             "weight_carry": weight_carry,
             "horse_weight": horse_weight,
             "weight_diff": weight_diff,
