@@ -86,18 +86,24 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
 
 @st.cache_resource
 def load_model():
-    """model.joblib が無ければ、その場でダミーデータ生成→学習して作る。
+    """毎回その場で学習してモデルを作る(保存済みmodel.joblibは使わない)。
 
-    GitHub上にモデルファイル(バイナリ)をアップロードしなくても
-    アプリが自力でセットアップできるようにするための仕組み。
+    ファイルに保存したモデルを使い回す方式だと、列構成を変更した時に
+    古いモデルとズレて壊れる(KeyErrorなど)ため、st.cache_resourceの
+    キャッシュだけに頼る。
+    データCSV(data/dummy_races.csv)は、既に置き換えた実データを
+    誤って上書きしないよう、無い時だけダミーデータを生成する。
     """
-    if os.path.exists(MODEL_PATH):
-        return joblib.load(MODEL_PATH)
-
     from data.generate_dummy_data import generate
-    from model.train_model import train
+    from model.train_model import train, FEATURE_COLS
 
-    if not os.path.exists(DATA_PATH):
+    needs_regen = True
+    if os.path.exists(DATA_PATH):
+        existing_cols = pd.read_csv(DATA_PATH, nrows=0).columns.tolist()
+        # 既存CSVが今の特徴量(venue列など)を満たしていれば、実データを維持する
+        needs_regen = not set(FEATURE_COLS).issubset(set(existing_cols))
+
+    if needs_regen:
         os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
         generate(DATA_PATH, verbose=False)
 
