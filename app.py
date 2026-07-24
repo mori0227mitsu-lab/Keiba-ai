@@ -158,7 +158,6 @@ def compute_custom_score(df: pd.DataFrame, weights: dict) -> pd.Series:
 
     scores = pd.Series(0.0, index=df.index)
     total_weight = sum(weights.values()) or 1
-    scores += weights.get("popularity", 0) * normalize_lower_is_better(df["popularity"])
     scores += weights.get("prev_rank", 0) * normalize_lower_is_better(df["prev_rank"], prev_rank_unknown)
     scores += weights.get("weight_carry", 0) * normalize_lower_is_better(df["weight_carry"])
     scores += weights.get("weight_diff", 0) * normalize_lower_is_better(df["weight_diff"].abs())
@@ -287,10 +286,9 @@ def main():
         )
         wcol1, wcol2 = st.columns(2)
         with wcol1:
-            w_popularity = st.slider("人気を重視する", 0, 100, 50)
-            w_prev_rank = st.slider("前走着順を重視する", 0, 100, 30)
+            w_prev_rank = st.slider("前走着順を重視する", 0, 100, 50)
         with wcol2:
-            w_weight_carry = st.slider("斤量の軽さを重視する", 0, 100, 20)
+            w_weight_carry = st.slider("斤量の軽さを重視する", 0, 100, 30)
             w_weight_diff = st.slider("馬体重の安定を重視する(増減が少ない馬を評価)", 0, 100, 20)
 
     if st.button("予測する", type="primary"):
@@ -308,7 +306,6 @@ def main():
         proba = bundle["model"].predict_proba(X)[:, 1]
 
         custom_weights = {
-            "popularity": w_popularity,
             "prev_rank": w_prev_rank,
             "weight_carry": w_weight_carry,
             "weight_diff": w_weight_diff,
