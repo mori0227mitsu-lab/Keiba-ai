@@ -127,9 +127,8 @@ def main():
             "popularity": "人気", "odds": "オッズ",
         })
 
-                st.subheader("③ 予測結果")
+        st.subheader("③ 予測結果")
         st.dataframe(result, use_container_width=True)
-
         st.bar_chart(result.set_index("馬番")["複勝確率(3着以内)"])
 
         st.caption(
