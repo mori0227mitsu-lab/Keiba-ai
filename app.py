@@ -19,7 +19,13 @@ import pandas as pd
 import streamlit as st
 
 from model.train_model import FEATURE_COLS, build_features
-from course_info import COURSE_STRAIGHT_LENGTH, DAY_BIAS_OPTIONS, RUNNING_STYLES, VENUES
+from course_info import (
+    COURSE_DISTANCES,
+    COURSE_STRAIGHT_LENGTH,
+    DAY_BIAS_OPTIONS,
+    RUNNING_STYLES,
+    VENUES,
+)
 
 FEATURE_HASH = hashlib.md5(",".join(FEATURE_COLS).encode()).hexdigest()[:8]
 
@@ -213,9 +219,10 @@ def main():
     with col0:
         venue = st.selectbox("開催場", VENUES)
     with col1:
-        distance = st.number_input("距離(m)", min_value=1000, max_value=3600, value=1600, step=100)
-    with col2:
         track_type = st.selectbox("コース種別", ["芝", "ダート"])
+    with col2:
+        available_distances = COURSE_DISTANCES[venue][track_type]
+        distance = st.selectbox("距離(m)", available_distances)
     with col3:
         condition = st.selectbox("馬場状態", ["良", "稍重", "重", "不良"])
 
