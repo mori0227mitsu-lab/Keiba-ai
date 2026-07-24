@@ -23,6 +23,7 @@ JOCKEYS = [
 
 TRACK_TYPES = ["芝", "ダート"]
 CONDITIONS = ["良", "稍重", "重", "不良"]
+VENUES = ["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]
 
 N_RACES = 60          # ダミーで作るレース数
 HORSES_PER_RACE = 12  # 1レースあたりの出走頭数
@@ -32,6 +33,7 @@ def make_race(race_id: int) -> pd.DataFrame:
     distance = int(RNG.choice([1200, 1400, 1600, 1800, 2000, 2400]))
     track_type = RNG.choice(TRACK_TYPES, p=[0.6, 0.4])
     condition = RNG.choice(CONDITIONS, p=[0.55, 0.25, 0.15, 0.05])
+    venue = RNG.choice(VENUES)
 
     rows = []
     # レースごとの「隠れた強さ」を割り振り、それに基づいて着順を生成する
@@ -62,6 +64,7 @@ def make_race(race_id: int) -> pd.DataFrame:
 
         rows.append({
             "race_id": race_id,
+            "venue": venue,
             "distance": distance,
             "track_type": track_type,
             "condition": condition,
