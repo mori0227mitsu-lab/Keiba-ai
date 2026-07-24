@@ -9,6 +9,7 @@
 各馬の「複勝(3着以内)確率」を予測してランキング表示します。
 """
 
+import io
 import os
 
 import joblib
@@ -35,6 +36,52 @@ DEFAULT_ROWS = pd.DataFrame([
 
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "dummy_races.csv")
+
+HORSE_TABLE_COLS = [
+    "horse_num", "waku", "sex", "age", "jockey", "weight_carry",
+    "horse_weight", "weight_diff", "prev_rank", "rest_weeks",
+    "popularity", "odds",
+]
+
+
+def parse_pasted_csv(text: str) -> pd.DataFrame:
+    """CSVテキストを出走馬テーブルの形式に変換する。
+
+    列が足りない場合は妥当な既定値で埋める(prev_rank/rest_weeksは0=不明など)。
+    """
+    df = pd.read_csv(io.StringIO(text.strip()))
+    df.columns = [c.strip() for c in df.columns]
+
+    # 学習・表示に不要な列(race_id, venue, distance, track_type, condition, finish_rank)は無視する
+    df = df[[c for c in df.columns if c in HORSE_TABLE_COLS]]
+
+    defaults = {
+        "waku": None,  # horse_numで後埋め
+        "sex": "牡",
+        "age": 4,
+        "jockey": "UNK",
+        "weight_carry": 55.0,
+        "horse_weight": 460,
+        "weight_diff": 0,
+        "prev_rank": 0,
+        "rest_weeks": 0,
+        "popularity": None,  # 後で順位を振る
+        "odds": 10.0,
+    }
+    if "horse_num" not in df.columns:
+        raise ValueError("horse_num列が見つかりません。CSVの1行目(ヘッダー)を確認してください。")
+
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+
+    if df["waku"].isna().any():
+        df["waku"] = df["waku"].fillna(df["horse_num"])
+    if df["popularity"].isna().any():
+        df["popularity"] = range(1, len(df) + 1)
+
+    df = df[HORSE_TABLE_COLS]
+    return df.reset_index(drop=True)
 
 
 @st.cache_resource
@@ -81,10 +128,32 @@ def main():
         condition = st.selectbox("馬場状態", ["良", "稍重", "重", "不良"])
 
     st.subheader("② 出走馬の情報")
+
+    if "horse_df" not in st.session_state:
+        st.session_state.horse_df = DEFAULT_ROWS.copy()
+    if "horse_table_version" not in st.session_state:
+        st.session_state.horse_table_version = 0
+
+    with st.expander("💡 CSVを貼り付けて一括入力する(手入力の手間を減らせます)"):
+        st.caption(
+            "ヘッダー行付きのCSVを貼り付けてください。列は "
+            "horse_num, waku, sex, age, jockey, weight_carry, horse_weight, "
+            "weight_diff, prev_rank, rest_weeks, popularity, odds "
+            "の一部だけでもOKです(無い列は既定値で埋めます)。"
+        )
+        pasted = st.text_area("CSVテキスト", height=120, key="csv_paste")
+        if st.button("表に反映"):
+            try:
+                st.session_state.horse_df = parse_pasted_csv(pasted)
+                st.session_state.horse_table_version += 1
+                st.success(f"{len(st.session_state.horse_df)}頭分を表に反映しました。")
+            except Exception as e:
+                st.error(f"読み込みに失敗しました: {e}")
+
     st.caption("表を直接編集できます。行の追加・削除も可能です。")
 
     edited = st.data_editor(
-        DEFAULT_ROWS,
+        st.session_state.horse_df,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
@@ -101,7 +170,7 @@ def main():
             "popularity": st.column_config.NumberColumn("人気", min_value=1, max_value=18, step=1),
             "odds": st.column_config.NumberColumn("オッズ", min_value=1.0, step=0.1, format="%.1f"),
         },
-        key="horse_table",
+        key=f"horse_table_{st.session_state.horse_table_version}",
     )
 
     if st.button("予測する", type="primary"):
