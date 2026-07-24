@@ -19,21 +19,23 @@ import pandas as pd
 import streamlit as st
 
 from model.train_model import FEATURE_COLS, build_features
+from course_info import COURSE_STRAIGHT_LENGTH, DAY_BIAS_OPTIONS, RUNNING_STYLES, VENUES
 
 FEATURE_HASH = hashlib.md5(",".join(FEATURE_COLS).encode()).hexdigest()[:8]
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "model.joblib")
 
-VENUES = ["札幌", "函館", "福島", "新潟", "東京", "中山", "中京", "京都", "阪神", "小倉"]
-
 DEFAULT_ROWS = pd.DataFrame([
     {"horse_num": 1, "waku": 1, "sex": "牡", "age": 4, "jockey": "C.ルメール",
+     "running_style": "先行",
      "weight_carry": 57.0, "horse_weight": 480, "weight_diff": 2,
      "prev_rank": 2, "rest_weeks": 5, "popularity": 1, "odds": 2.5},
     {"horse_num": 2, "waku": 1, "sex": "牝", "age": 3, "jockey": "川田将雅",
+     "running_style": "差し",
      "weight_carry": 54.0, "horse_weight": 452, "weight_diff": -4,
      "prev_rank": 5, "rest_weeks": 8, "popularity": 2, "odds": 5.1},
     {"horse_num": 3, "waku": 2, "sex": "牡", "age": 5, "jockey": "武豊",
+     "running_style": "逃げ",
      "weight_carry": 58.0, "horse_weight": 498, "weight_diff": 0,
      "prev_rank": 1, "rest_weeks": 4, "popularity": 3, "odds": 6.8},
 ])
@@ -42,7 +44,7 @@ DEFAULT_ROWS = pd.DataFrame([
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "dummy_races.csv")
 
 HORSE_TABLE_COLS = [
-    "horse_num", "waku", "sex", "age", "jockey", "weight_carry",
+    "horse_num", "waku", "sex", "age", "jockey", "running_style", "weight_carry",
     "horse_weight", "weight_diff", "prev_rank", "rest_weeks",
     "popularity", "odds",
 ]
@@ -82,6 +84,7 @@ def parse_netkeiba_shutuba(text: str) -> pd.DataFrame:
             "sex": d["sex"],
             "age": int(d["age"]),
             "jockey": d["jockey"],
+            "running_style": "差し",  # netkeibaの出馬表ページには脚質情報が無いため既定値
             "weight_carry": float(d["weight_carry"]),
             "horse_weight": int(d["horse_weight"]),
             "weight_diff": int(d["weight_diff"]),
@@ -109,6 +112,7 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
         "sex": "牡",
         "age": 4,
         "jockey": "UNK",
+        "running_style": "差し",
         "weight_carry": 55.0,
         "horse_weight": 460,
         "weight_diff": 0,
@@ -215,6 +219,14 @@ def main():
     with col3:
         condition = st.selectbox("馬場状態", ["良", "稍重", "重", "不良"])
 
+    straight_length = COURSE_STRAIGHT_LENGTH[venue]
+    day_bias = st.selectbox(
+        "今日の馬場傾向",
+        DAY_BIAS_OPTIONS,
+        help="レース当日の実況・データを見て、内外や脚質の有利不利があれば選んでください。分からなければ「フラット」でOKです。",
+    )
+    st.caption(f"📏 {venue}の直線の長さ: {straight_length}(固定情報として自動反映されます)")
+
     st.subheader("② 出走馬の情報")
 
     if "horse_df" not in st.session_state:
@@ -267,6 +279,7 @@ def main():
             "sex": st.column_config.SelectboxColumn("性別", options=["牡", "牝", "セ"]),
             "age": st.column_config.NumberColumn("馬齢", min_value=2, max_value=10, step=1),
             "jockey": st.column_config.TextColumn("騎手", help="騎手名を直接入力してください"),
+            "running_style": st.column_config.SelectboxColumn("脚質", options=RUNNING_STYLES),
             "weight_carry": st.column_config.NumberColumn("斤量", min_value=48.0, max_value=64.0, step=0.5),
             "horse_weight": st.column_config.NumberColumn("馬体重", min_value=350, max_value=600, step=1),
             "weight_diff": st.column_config.NumberColumn("体重増減", min_value=-30, max_value=30, step=1),
@@ -301,6 +314,8 @@ def main():
         df["distance"] = distance
         df["track_type"] = track_type
         df["condition"] = condition
+        df["day_bias"] = day_bias
+        df["straight_length"] = straight_length
 
         X, _ = build_features(df, encoders=bundle["encoders"])
         proba = bundle["model"].predict_proba(X)[:, 1]
