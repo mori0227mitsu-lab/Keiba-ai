@@ -58,11 +58,11 @@ HORSE_TABLE_COLS = [
 
 NETKEIBA_SHUTUBA_PATTERN = re.compile(
     r"(?P<waku>\d{1,2})\t(?P<horse_num>\d{1,2})\t\s*\n"
-    r"--\s*\n"
+    r"(?:--|✓|☆|★|◎|○|▲|△)?\s*\n"
     r"(?P<name>[^\n]+)\n"
     r"(?P<sex>[牡牝セ])(?P<age>\d{1,2})\t(?P<weight_carry>[\d.]+)\t"
     r"(?P<jockey>[^\t\n]+)\t(?P<stable>[^\t\n]+)\t"
-    r"(?:(?P<horse_weight>\d{2,3})\((?P<weight_diff>[+-]?\d+)\)\t|計不\t|--\t)?"
+    r"(?:(?P<horse_weight>\d{2,3})\((?P<weight_diff>[+-]?\d+)\)|計不|--)?\t"
     r"(?P<odds>[\d.]*)\t(?P<popularity>\d{1,2})?\t?"
 )
 
