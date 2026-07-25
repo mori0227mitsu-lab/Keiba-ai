@@ -32,16 +32,16 @@ FEATURE_HASH = hashlib.md5(",".join(FEATURE_COLS).encode()).hexdigest()[:8]
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "model.joblib")
 
 DEFAULT_ROWS = pd.DataFrame([
-    {"horse_num": 1, "waku": 1, "sex": "牡", "age": 4, "jockey": "C.ルメール",
-     "running_style": "先行",
+    {"horse_num": 1, "horse_name": "サンプルホースA", "waku": 1, "sex": "牡", "age": 4,
+     "jockey": "C.ルメール", "trainer": "美浦 手塚久", "running_style": "先行",
      "weight_carry": 57.0, "horse_weight": 480, "weight_diff": 2,
      "prev_rank": 2, "rest_weeks": 5, "popularity": 1, "odds": 2.5},
-    {"horse_num": 2, "waku": 1, "sex": "牝", "age": 3, "jockey": "川田将雅",
-     "running_style": "差し",
+    {"horse_num": 2, "horse_name": "サンプルホースB", "waku": 1, "sex": "牝", "age": 3,
+     "jockey": "川田将雅", "trainer": "栗東 中内田", "running_style": "差し",
      "weight_carry": 54.0, "horse_weight": 452, "weight_diff": -4,
      "prev_rank": 5, "rest_weeks": 8, "popularity": 2, "odds": 5.1},
-    {"horse_num": 3, "waku": 2, "sex": "牡", "age": 5, "jockey": "武豊",
-     "running_style": "逃げ",
+    {"horse_num": 3, "horse_name": "サンプルホースC", "waku": 2, "sex": "牡", "age": 5,
+     "jockey": "武豊", "trainer": "栗東 友道", "running_style": "逃げ",
      "weight_carry": 58.0, "horse_weight": 498, "weight_diff": 0,
      "prev_rank": 1, "rest_weeks": 4, "popularity": 3, "odds": 6.8},
 ])
@@ -50,9 +50,9 @@ DEFAULT_ROWS = pd.DataFrame([
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "dummy_races.csv")
 
 HORSE_TABLE_COLS = [
-    "horse_num", "waku", "sex", "age", "jockey", "running_style", "weight_carry",
-    "horse_weight", "weight_diff", "prev_rank", "rest_weeks",
-    "popularity", "odds",
+    "horse_num", "horse_name", "waku", "sex", "age", "jockey", "trainer",
+    "running_style", "weight_carry", "horse_weight", "weight_diff",
+    "prev_rank", "rest_weeks", "popularity", "odds",
 ]
 
 
@@ -86,10 +86,12 @@ def parse_netkeiba_shutuba(text: str) -> pd.DataFrame:
         d = m.groupdict()
         rows.append({
             "horse_num": int(d["horse_num"]),
+            "horse_name": d["name"].strip(),
             "waku": int(d["waku"]),
             "sex": d["sex"],
             "age": int(d["age"]),
             "jockey": d["jockey"],
+            "trainer": d["stable"].strip(),
             "running_style": "差し",  # netkeibaの出馬表ページには脚質情報が無いため既定値
             "weight_carry": float(d["weight_carry"]),
             "horse_weight": int(d["horse_weight"]),
@@ -115,9 +117,11 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
 
     defaults = {
         "waku": None,  # horse_numで後埋め
+        "horse_name": "",
         "sex": "牡",
         "age": 4,
         "jockey": "UNK",
+        "trainer": "UNK",
         "running_style": "差し",
         "weight_carry": 55.0,
         "horse_weight": 460,
@@ -168,6 +172,7 @@ def compute_custom_score(df: pd.DataFrame, weights: dict) -> pd.Series:
 
     scores = pd.Series(0.0, index=df.index)
     total_weight = sum(weights.values()) or 1
+    scores += weights.get("popularity", 0) * normalize_lower_is_better(df["popularity"])
     scores += weights.get("prev_rank", 0) * normalize_lower_is_better(df["prev_rank"], prev_rank_unknown)
     scores += weights.get("weight_carry", 0) * normalize_lower_is_better(df["weight_carry"])
     scores += weights.get("weight_diff", 0) * normalize_lower_is_better(df["weight_diff"].abs())
@@ -282,10 +287,12 @@ def main():
         use_container_width=True,
         column_config={
             "horse_num": st.column_config.NumberColumn("馬番", min_value=1, step=1),
+            "horse_name": st.column_config.TextColumn("馬名"),
             "waku": st.column_config.NumberColumn("枠番", min_value=1, max_value=8, step=1),
             "sex": st.column_config.SelectboxColumn("性別", options=["牡", "牝", "セ"]),
             "age": st.column_config.NumberColumn("馬齢", min_value=2, max_value=10, step=1),
             "jockey": st.column_config.TextColumn("騎手", help="騎手名を直接入力してください"),
+            "trainer": st.column_config.TextColumn("厩舎", help="例: 美浦 手塚久"),
             "running_style": st.column_config.SelectboxColumn("脚質", options=RUNNING_STYLES),
             "weight_carry": st.column_config.NumberColumn("斤量", min_value=48.0, max_value=64.0, step=0.5),
             "horse_weight": st.column_config.NumberColumn("馬体重", min_value=350, max_value=600, step=1),
@@ -334,13 +341,14 @@ def main():
         }
         custom_score = compute_custom_score(edited, custom_weights)
 
-        result = edited[["horse_num", "waku", "jockey", "popularity", "odds"]].copy()
+        display_cols = ["horse_num", "horse_name", "waku", "jockey", "popularity", "odds"]
+        result = edited[[c for c in display_cols if c in edited.columns]].copy()
         result["AI複勝確率(%)"] = (proba * 100).round(1)
         result["あなたのスコア"] = custom_score
         result = result.sort_values("あなたのスコア", ascending=False).reset_index(drop=True)
         result.index = result.index + 1
         result = result.rename(columns={
-            "horse_num": "馬番", "waku": "枠番", "jockey": "騎手",
+            "horse_num": "馬番", "horse_name": "馬名", "waku": "枠番", "jockey": "騎手",
             "popularity": "人気", "odds": "オッズ",
         })
 
