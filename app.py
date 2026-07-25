@@ -62,8 +62,8 @@ NETKEIBA_SHUTUBA_PATTERN = re.compile(
     r"(?P<name>[^\n]+)\n"
     r"(?P<sex>[牡牝セ])(?P<age>\d{1,2})\t(?P<weight_carry>[\d.]+)\t"
     r"(?P<jockey>[^\t\n]+)\t(?P<stable>[^\t\n]+)\t"
-    r"(?P<horse_weight>\d{2,3})\((?P<weight_diff>[+-]?\d+)\)\t"
-    r"(?P<odds>[\d.]+)\t(?P<popularity>\d{1,2})\t"
+    r"(?:(?P<horse_weight>\d{2,3})\((?P<weight_diff>[+-]?\d+)\)\t|計不\t|--\t)?"
+    r"(?P<odds>[\d.]*)\t(?P<popularity>\d{1,2})?\t?"
 )
 
 
@@ -94,12 +94,14 @@ def parse_netkeiba_shutuba(text: str) -> pd.DataFrame:
             "trainer": d["stable"].strip(),
             "running_style": "差し",  # netkeibaの出馬表ページには脚質情報が無いため既定値
             "weight_carry": float(d["weight_carry"]),
-            "horse_weight": int(d["horse_weight"]),
-            "weight_diff": int(d["weight_diff"]),
+            # 前日予想では馬体重がまだ発表されていないことが多いので、無ければ既定値(460/0)を使う
+            "horse_weight": int(d["horse_weight"]) if d.get("horse_weight") else 460,
+            "weight_diff": int(d["weight_diff"]) if d.get("weight_diff") else 0,
             "prev_rank": 0,
             "rest_weeks": 0,
-            "popularity": int(d["popularity"]),
-            "odds": float(d["odds"]),
+            # 前日は人気・オッズが確定していないことも多いので、無ければ既定値を使う
+            "popularity": int(d["popularity"]) if d.get("popularity") else int(d["horse_num"]),
+            "odds": float(d["odds"]) if d.get("odds") else 10.0,
         })
     return pd.DataFrame(rows)[HORSE_TABLE_COLS]
 
@@ -145,6 +147,54 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
 
     df = df[HORSE_TABLE_COLS]
     return df.reset_index(drop=True)
+
+
+def lookup_horse_history() -> pd.DataFrame:
+    """data/dummy_races.csv(実データ)から、各馬名の最新レース結果を取得する。
+
+    horse_nameをキーにした DataFrame を返す(prev_rank, time_sec, agari_3f, corner_pos)。
+    """
+    if not os.path.exists(DATA_PATH):
+        return pd.DataFrame()
+    hist = pd.read_csv(DATA_PATH)
+    if "horse_name" not in hist.columns:
+        return pd.DataFrame()
+
+    hist = hist.dropna(subset=["horse_name"])
+    hist = hist[hist["horse_name"].astype(str).str.strip() != ""]
+    if hist.empty:
+        return pd.DataFrame()
+
+    hist = hist.sort_values("race_id")
+    latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
+    return latest
+
+
+def apply_horse_history(df: pd.DataFrame, history: pd.DataFrame):
+    """出走馬テーブルのhorse_nameを使って前走成績(prev_rank)を自動入力する。
+
+    見つかった前走のタイム・上がり3F・通過順は、表には出さず
+    st.session_state.prev_extra に保存しておき、予測時にこっそり使う。
+    """
+    df = df.copy()
+    extra = {}
+    matched = 0
+    for i, row in df.iterrows():
+        name = str(row.get("horse_name", "")).strip()
+        if not name or name not in history.index:
+            continue
+        h = history.loc[name]
+        if isinstance(h, pd.DataFrame):  # 同名馬が複数いる場合は最初の1件
+            h = h.iloc[0]
+        if pd.notna(h.get("finish_rank")):
+            df.at[i, "prev_rank"] = int(h["finish_rank"])
+            matched += 1
+        extra[name] = {
+            "prev_time_sec": h.get("time_sec", 0) if pd.notna(h.get("time_sec")) else 0,
+            "prev_agari_3f": h.get("agari_3f", 0) if pd.notna(h.get("agari_3f")) else 0,
+            "prev_corner_pos": h.get("corner_pos", 0) if pd.notna(h.get("corner_pos")) else 0,
+        }
+    return df, matched, extra
 
 
 MARKS = ["◎", "○", "▲", "△", "△"]
@@ -313,6 +363,20 @@ def main():
         key=f"horse_table_{st.session_state.horse_table_version}",
     )
 
+    if st.button("🔎 馬名から前走成績を自動入力"):
+        history = lookup_horse_history()
+        if history.empty:
+            st.warning("過去データが見つかりませんでした(まだ馬名付きのデータが少ない可能性があります)。")
+        else:
+            updated, matched, extra = apply_horse_history(edited, history)
+            st.session_state.horse_df = updated
+            st.session_state.horse_table_version += 1
+            st.session_state.prev_extra = extra
+            if matched:
+                st.success(f"{matched}頭分、前走成績を反映しました(表の「前走着順」を確認してください)。")
+            else:
+                st.info("表の馬名と一致する過去データが見つかりませんでした。馬名の表記が過去データと合っているか確認してください。")
+
     if st.button("予測する", type="primary"):
         if edited.empty:
             st.warning("出走馬の情報を入力してください。")
@@ -325,6 +389,17 @@ def main():
         df["condition"] = condition
         df["day_bias"] = day_bias
         df["straight_length"] = straight_length
+
+        # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順)をマージ
+        prev_extra = st.session_state.get("prev_extra", {})
+        for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
+            df[col] = 0.0
+        if prev_extra and "horse_name" in df.columns:
+            for i, row in df.iterrows():
+                name = str(row.get("horse_name", "")).strip()
+                if name in prev_extra:
+                    for col, val in prev_extra[name].items():
+                        df.at[i, col] = val
 
         X, _ = build_features(df, encoders=bundle["encoders"])
         proba = bundle["model"].predict_proba(X)[:, 1]
