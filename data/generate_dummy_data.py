@@ -25,6 +25,10 @@ JOCKEYS = [
 
 TRACK_TYPES = ["芝", "ダート"]
 CONDITIONS = ["良", "稍重", "重", "不良"]
+TRAINERS = [
+    "美浦 手塚久", "美浦 木村", "美浦 国枝", "栗東 中内田", "栗東 友道",
+    "栗東 矢作", "栗東 杉山晴", "美浦 田中博", "栗東 高野", "美浦 斎藤誠",
+]
 
 N_RACES = 60          # ダミーで作るレース数
 HORSES_PER_RACE = 12  # 1レースあたりの出走頭数
@@ -87,10 +91,12 @@ def make_race(race_id: int) -> pd.DataFrame:
             "straight_length": straight_length,
             "day_bias": day_bias,
             "horse_num": horse_num,
+            "horse_name": f"ダミー馬{race_id:03d}_{horse_num:02d}",
             "waku": waku,
             "sex": sex,
             "age": age,
             "jockey": jockey,
+            "trainer": TRAINERS[RNG.integers(0, len(TRAINERS))],
             "running_style": running_style,
             "weight_carry": weight_carry,
             "horse_weight": horse_weight,
@@ -117,6 +123,14 @@ def make_race(race_id: int) -> pd.DataFrame:
     df["odds"] = (df["popularity"] ** 1.5 * RNG.uniform(0.8, 1.4, len(df))).round(1) + 1.0
 
     df = df.drop(columns=["_strength", "_true_strength", "_market_strength"])
+
+    # 着順に応じてタイム・上がり3F・通過順を生成(結果データなので予測材料には使わない)
+    base_time = distance / 1000 * 60 + RNG.normal(0, 1.0)
+    df["time_sec"] = (base_time + (df["finish_rank"] - 1) * RNG.uniform(0.1, 0.4, len(df))).round(1)
+    df["agari_3f"] = (34.0 + (df["finish_rank"] - 1) * 0.15 + RNG.normal(0, 0.5, len(df))).round(1)
+    style_to_pos = {"逃げ": 1, "先行": 3, "差し": 7, "追い込み": 10}
+    df["corner_pos"] = df["running_style"].map(style_to_pos).fillna(5).astype(int)
+
     df = df.sort_values("horse_num").reset_index(drop=True)
     return df
 
