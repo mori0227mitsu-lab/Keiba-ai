@@ -18,7 +18,7 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-from model.train_model import FEATURE_COLS, build_features, compute_pace_note, PACE_NOTE_NONE
+from model.train_model import FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note, PACE_NOTE_NONE
 from data_collector import parse_netkeiba_result
 from github_sync import append_rows_to_csv
 from course_info import (
@@ -282,8 +282,11 @@ def load_model(_feature_hash: str):
     needs_regen = True
     if os.path.exists(DATA_PATH):
         existing_cols = pd.read_csv(DATA_PATH, nrows=0).columns.tolist()
-        # 既存CSVが今の特徴量(venue列など)を満たしていれば、実データを維持する
-        needs_regen = not set(FEATURE_COLS).issubset(set(existing_cols))
+        # 「CSVファイルに実際に保存されているべき生の列」だけで判定する。
+        # FEATURE_COLS全体で判定すると、prev_time_secなどその場で計算される列が
+        # 常に「無い」と判定されてしまい、実データがダミーデータで上書きされる
+        # 重大なバグになるため、RAW_REQUIRED_COLSを使う。
+        needs_regen = not set(RAW_REQUIRED_COLS).issubset(set(existing_cols))
 
     if needs_regen:
         os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
