@@ -49,7 +49,11 @@ def update_csv(token: str, repo: str, branch: str, path: str, df: pd.DataFrame, 
 
 
 def append_rows_to_csv(token: str, repo: str, branch: str, path: str, new_rows: pd.DataFrame, message: str) -> int:
-    """既存CSVに新しい行を追記してコミットする。戻り値: 追記後の総行数"""
+    """既存CSVに新しい行を追記してコミットする。戻り値: 追記後の総行数
+
+    new_rowsの中に、既存CSVと同じrace_idの行が含まれている場合は、
+    その古い行を削除してから追記する(=上書きになる)。
+    """
     df, sha = fetch_csv(token, repo, branch, path)
 
     # 列構成を既存CSVに合わせる(新しい列は追加、足りない列は0で埋める)
@@ -61,9 +65,43 @@ def append_rows_to_csv(token: str, repo: str, branch: str, path: str, new_rows: 
             new_rows[col] = 0
     new_rows = new_rows[df.columns]
 
+    # 上書き対象(同じrace_id)の古い行を先に取り除く
+    if "race_id" in df.columns and "race_id" in new_rows.columns:
+        overwrite_ids = set(new_rows["race_id"].unique())
+        df = df[~df["race_id"].isin(overwrite_ids)]
+
     combined = pd.concat([df, new_rows], ignore_index=True)
     update_csv(token, repo, branch, path, combined, sha, message)
     return len(combined)
+
+
+def find_existing_race_ids(
+    df: pd.DataFrame, races: list[dict],
+) -> dict:
+    """races(各レースの venue/distance/track_type/race_date の辞書リスト)について、
+    既存CSV(df)の中に同じ組み合わせのレースが無いか調べる。
+
+    戻り値: {連番インデックス: 既存のrace_id} のdict(一致したものだけ)。
+    race_date(開催日)が両方に入っている場合はそれも一致条件に加える
+    (無い場合は venue/distance/track_typeだけで判定する)。
+    """
+    matches = {}
+    if df.empty or "venue" not in df.columns:
+        return matches
+
+    for i, race in enumerate(races):
+        cond = (
+            (df["venue"] == race.get("venue"))
+            & (df["distance"] == race.get("distance"))
+            & (df["track_type"] == race.get("track_type"))
+        )
+        race_date = race.get("race_date")
+        if race_date and "race_date" in df.columns:
+            cond = cond & (df["race_date"].astype(str) == str(race_date))
+        found = df[cond]
+        if len(found):
+            matches[i] = int(found["race_id"].iloc[0])
+    return matches
 
 
 def get_next_race_id(token: str, repo: str, branch: str, path: str, default: int = 9001) -> int:
