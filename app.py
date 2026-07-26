@@ -22,7 +22,7 @@ from model.train_model import (
     FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
     PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest, add_chronological_sort_key,
 )
-from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi
+from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
 from course_info import (
     COURSE_DISTANCES,
@@ -503,6 +503,33 @@ def main():
 
         if "collect_preview" in st.session_state:
             st.dataframe(st.session_state.collect_preview, use_container_width=True)
+
+            with st.expander("🔄 コーナー通過順位を後から貼り付けて反映する(行内に無かった場合)"):
+                st.caption(
+                    "netkeibaページ下部の「コーナー通過順位」の部分"
+                    "(例: 「3コーナー\\t(*1,3)(7,8)...」のような行)をまとめて貼り付けてください。"
+                )
+                preview_race_ids = sorted(st.session_state.collect_preview["race_id"].unique())
+                target_race_id = st.selectbox("対象のrace_id", preview_race_ids, key="corner_target_race")
+                corner_text = st.text_area(
+                    "コーナー通過順位セクション",
+                    height=100,
+                    key=f"corner_paste_{st.session_state.get('corner_paste_version', 0)}",
+                )
+                if st.button("反映する", key="corner_apply"):
+                    apply_ok = False
+                    try:
+                        st.session_state.collect_preview = apply_corner_section_to_df(
+                            st.session_state.collect_preview, corner_text, int(target_race_id),
+                        )
+                        st.toast("コーナー通過順位を反映しました。", icon="✅")
+                        st.session_state.corner_paste_version = st.session_state.get("corner_paste_version", 0) + 1
+                        apply_ok = True
+                    except Exception as e:
+                        st.error(str(e))
+                    if apply_ok:
+                        st.rerun()
+
             if st.button("✅ GitHubに保存する", type="primary"):
                 save_succeeded = False
                 try:
