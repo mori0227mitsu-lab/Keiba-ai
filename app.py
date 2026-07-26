@@ -271,17 +271,82 @@ def load_model(_feature_hash: str):
 
 
 def main():
-    st.set_page_config(page_title="競馬予想AI", page_icon="🐎", layout="wide")
-    st.title("🐎 競馬予想AI")
-    st.caption(
-        "現在は練習用のダミーデータで学習したモデルです。"
-        "実データ(netkeiba / JRA-VANなど)に差し替えることで精度が上がります。"
+    st.set_page_config(page_title="KEIBA AI｜競馬予想", page_icon="🏇", layout="wide")
+
+    st.markdown(
+        """
+        <style>
+        #MainMenu, footer, header {visibility: hidden;}
+
+        .hero {
+            padding: 1.4rem 1.8rem;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #2F6F4E 0%, #1F4D37 100%);
+            color: #FAF8F3;
+            margin-bottom: 1.6rem;
+        }
+        .hero h1 {
+            margin: 0;
+            font-size: 1.9rem;
+            letter-spacing: 0.02em;
+        }
+        .hero p {
+            margin: 0.3rem 0 0 0;
+            color: #E4DCC8;
+            font-size: 0.95rem;
+        }
+        .section-head {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            border-left: 5px solid #C9A227;
+            padding-left: 0.6rem;
+            margin: 1.4rem 0 0.6rem 0;
+        }
+        .section-head .num {
+            background: #2F6F4E;
+            color: #FAF8F3;
+            border-radius: 50%;
+            width: 1.6rem;
+            height: 1.6rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .section-head .label {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #1F2A24;
+        }
+        .disclaimer {
+            font-size: 0.78rem;
+            color: #8A8578;
+            border-top: 1px solid #E7E2D6;
+            padding-top: 0.6rem;
+            margin-top: 1rem;
+        }
+        </style>
+        <div class="hero">
+            <h1>🏇 KEIBA AI</h1>
+            <p>過去のレースデータから、出走馬の複勝圏内(3着以内)の可能性をAIが評価します。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    with st.spinner("モデルを準備しています(初回のみ数秒かかります)..."):
+    def section_head(num: str, label: str):
+        st.markdown(
+            f'<div class="section-head"><span class="num">{num}</span>'
+            f'<span class="label">{label}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    with st.spinner("モデルを準備しています..."):
         bundle = load_model(FEATURE_HASH)
 
-    with st.expander("📥 データを集める(結果ページを貼り付けてGitHubに自動保存)"):
+    with st.expander("📥 データを集める(結果ページを貼り付けて自動保存)"):
         st.caption(
             "netkeibaの「結果」ページの表をコピーして貼り付けると、解析してGitHub上の"
             "data/dummy_races.csvに追記できます(Streamlit Cloud側にgithub_tokenの設定が必要です)。"
@@ -319,7 +384,7 @@ def main():
                 except Exception as e:
                     st.error(f"保存に失敗しました: {e}")
 
-    st.subheader("① レース条件")
+    section_head("1", "レース条件")
     col0, col1, col2, col3 = st.columns(4)
     with col0:
         venue = st.selectbox("開催場", VENUES)
@@ -339,7 +404,7 @@ def main():
     )
     st.caption(f"📏 {venue}の直線の長さ: {straight_length}(固定情報として自動反映されます)")
 
-    st.subheader("② 出走馬の情報")
+    section_head("2", "出走馬の情報")
 
     if "horse_df" not in st.session_state:
         st.session_state.horse_df = DEFAULT_ROWS.copy()
@@ -471,7 +536,7 @@ def main():
             "popularity": "人気", "odds": "オッズ",
         })
 
-        st.subheader("③ 予測結果")
+        section_head("3", "予測結果")
 
         # 上位ピックアップを見やすく表示
         picks = result[result["印"] != ""]
@@ -488,9 +553,10 @@ def main():
             "マイナスの馬は人気先行の可能性があります。"
         )
 
-        st.caption(
-            "⚠️ このアプリはあくまで学習・娯楽目的の予測ツールです。"
-            "馬券の購入は自己責任で、ご利用は20歳以上の方に限ります。"
+        st.markdown(
+            '<div class="disclaimer">⚠️ 本ツールは娯楽・分析目的の予測ツールです。'
+            '馬券の購入は自己責任で、ご利用は20歳以上の方に限ります。</div>',
+            unsafe_allow_html=True,
         )
 
 
