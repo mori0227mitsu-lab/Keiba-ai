@@ -97,7 +97,12 @@ def find_existing_race_ids(
         )
         race_date = race.get("race_date")
         if race_date and "race_date" in df.columns:
-            cond = cond & (df["race_date"].astype(str) == str(race_date))
+            existing_date = df["race_date"].astype(str).str.strip()
+            existing_date = existing_date.replace({"nan": "", "NaT": "", "None": ""})
+            # 既存データの開催日が「空欄(不明)」の行は、日付が違っていても一致とみなす
+            # (前回、日付を入力せずに保存したレースを、後から日付ありで上書きできるように)
+            date_ok = (existing_date == "") | (existing_date == str(race_date))
+            cond = cond & date_ok
         found = df[cond]
         if len(found):
             matches[i] = int(found["race_id"].iloc[0])
