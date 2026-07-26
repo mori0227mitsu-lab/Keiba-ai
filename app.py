@@ -20,7 +20,7 @@ import streamlit as st
 
 from model.train_model import (
     FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
-    PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest,
+    PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest, add_chronological_sort_key,
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi
 from github_sync import append_rows_to_csv, get_next_race_id
@@ -175,7 +175,8 @@ def lookup_horse_history() -> pd.DataFrame:
         return pd.DataFrame(), pd.DataFrame()
 
     hist = compute_pace_note(hist)  # 各レース内での展開評価(強い勝ち方/展開不利)を付与
-    hist = hist.sort_values("race_id")
+    hist = add_chronological_sort_key(hist)
+    hist = hist.sort_values("_chron_key")
     latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
     return latest, hist
 
@@ -440,6 +441,14 @@ def main():
                 "開始race_id", min_value=1, value=9001, step=1, disabled=use_auto_id,
             )
 
+        collect_date = st.date_input(
+            "このレース(複数貼り付けた場合は全部)の開催日",
+            help=(
+                "前走の判定を「追加した順番」ではなく「実際の日付」で行うために使います。"
+                "後から昔のレースを追加しても、前走が正しく判定されるようになります。"
+            ),
+        )
+
         collect_text = st.text_area(
             "netkeibaの結果ページ(複数レース分をまとめて貼り付けてもOK)",
             height=200, key=f"collect_paste_{st.session_state.collect_paste_version}",
@@ -455,7 +464,9 @@ def main():
                 else:
                     start_id = int(manual_start_id)
 
-                preview_df = parse_netkeiba_results_multi(collect_text, start_race_id=start_id)
+                preview_df = parse_netkeiba_results_multi(
+                    collect_text, start_race_id=start_id, race_date=str(collect_date),
+                )
                 st.session_state.collect_preview = preview_df
                 n_races = preview_df["race_id"].nunique()
                 st.success(
