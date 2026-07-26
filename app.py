@@ -19,6 +19,8 @@ import pandas as pd
 import streamlit as st
 
 from model.train_model import FEATURE_COLS, build_features
+from data_collector import parse_netkeiba_result
+from github_sync import append_rows_to_csv
 from course_info import (
     COURSE_DISTANCES,
     COURSE_STRAIGHT_LENGTH,
@@ -276,6 +278,44 @@ def main():
 
     with st.spinner("モデルを準備しています(初回のみ数秒かかります)..."):
         bundle = load_model(FEATURE_HASH)
+
+    with st.expander("📥 データを集める(結果ページを貼り付けてGitHubに自動保存)"):
+        st.caption(
+            "netkeibaの「結果」ページの表をコピーして貼り付けると、解析してGitHub上の"
+            "data/dummy_races.csvに追記できます(Streamlit Cloud側にgithub_tokenの設定が必要です)。"
+        )
+        collect_race_id = st.number_input("この結果のrace_id(既存と重複しない番号)", min_value=1, value=9001, step=1)
+        collect_text = st.text_area("netkeibaの結果ページ", height=150, key="collect_paste")
+
+        if st.button("プレビュー"):
+            try:
+                preview_df = parse_netkeiba_result(collect_text, race_id=int(collect_race_id))
+                st.session_state.collect_preview = preview_df
+                st.success(f"{len(preview_df)}頭分を解析しました。内容を確認してから保存してください。")
+            except Exception as e:
+                st.error(str(e))
+
+        if "collect_preview" in st.session_state:
+            st.dataframe(st.session_state.collect_preview, use_container_width=True)
+            if st.button("✅ GitHubに保存する", type="primary"):
+                try:
+                    token = st.secrets["github_token"]
+                    repo = st.secrets["github_repo"]
+                    branch = st.secrets.get("github_branch", "main")
+                    total = append_rows_to_csv(
+                        token, repo, branch, "data/dummy_races.csv",
+                        st.session_state.collect_preview,
+                        message=f"Add race {int(collect_race_id)} data",
+                    )
+                    st.success(f"GitHubに保存しました!(CSV全体: {total}行)数分後にアプリが再デプロイされます。")
+                    del st.session_state.collect_preview
+                except KeyError:
+                    st.error(
+                        "GitHubのトークンが設定されていません。Streamlit Cloudの「Manage app」→"
+                        "「Settings」→「Secrets」に github_token / github_repo を設定してください。"
+                    )
+                except Exception as e:
+                    st.error(f"保存に失敗しました: {e}")
 
     st.subheader("① レース条件")
     col0, col1, col2, col3 = st.columns(4)
