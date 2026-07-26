@@ -33,7 +33,7 @@ MARKS = "▲△☆★◇"
 COND_FIX = {"稍": "稍重", "不": "不良"}
 
 CSV_COLS = [
-    "race_id", "venue", "distance", "track_type", "condition", "straight_length",
+    "race_id", "race_date", "venue", "distance", "track_type", "condition", "straight_length",
     "day_bias", "horse_num", "horse_name", "waku", "sex", "age", "jockey", "trainer",
     "running_style", "weight_carry", "horse_weight", "weight_diff",
     "prev_rank", "rest_weeks", "popularity", "odds", "finish_rank",
@@ -71,7 +71,7 @@ def _styles_from_corner(pos_list):
     return out
 
 
-def _parse_one_block(block: str, race_id: int) -> pd.DataFrame:
+def _parse_one_block(block: str, race_id: int, race_date: str = "") -> pd.DataFrame:
     """1レース分のブロックをCSV_COLS形式のDataFrameに変換する(内部用)。"""
     hm = HEADER_RE.search(block)
     if not hm:
@@ -105,6 +105,7 @@ def _parse_one_block(block: str, race_id: int) -> pd.DataFrame:
         finish = "99" if finish in ("中止", "除外", "取消") else finish
         rows.append({
             "race_id": race_id,
+            "race_date": race_date,
             "venue": venue,
             "distance": int(distance),
             "track_type": track_type,
@@ -135,20 +136,22 @@ def _parse_one_block(block: str, race_id: int) -> pd.DataFrame:
     return pd.DataFrame(rows)[CSV_COLS]
 
 
-def parse_netkeiba_result(text: str, race_id: int) -> pd.DataFrame:
+def parse_netkeiba_result(text: str, race_id: int, race_date: str = "") -> pd.DataFrame:
     """netkeibaの結果ページの生テキストを、CSV_COLS形式のDataFrameに変換する。
 
     1レース分のテキストを想定(複数レースが混ざっている場合は最初の1レース分のみ)。
     複数レースまとめて処理したい場合は parse_netkeiba_results_multi() を使う。
     """
-    return _parse_one_block(text, race_id)
+    return _parse_one_block(text, race_id, race_date)
 
 
-def parse_netkeiba_results_multi(text: str, start_race_id: int) -> pd.DataFrame:
+def parse_netkeiba_results_multi(text: str, start_race_id: int, race_date: str = "") -> pd.DataFrame:
     """複数レース分のnetkeiba結果ページを、まとめて貼り付けても一括処理する。
 
     「発走 / 芝1200m ... 馬場:良」のようなヘッダー行が出現する回数だけ
     レースがあるとみなし、race_idは start_race_id から1つずつ増やして割り振る。
+    race_date(例: "2026-07-25")を渡すと、前走の並び順の判定に使われる
+    (race_idの割り振り順ではなく、実際の日付を基準に「前走」を特定できるようになる)。
     """
     header_matches = list(HEADER_RE.finditer(text))
     if not header_matches:
@@ -163,7 +166,7 @@ def parse_netkeiba_results_multi(text: str, start_race_id: int) -> pd.DataFrame:
         block = text[start:end]
         race_id = start_race_id + i
         try:
-            race_df = _parse_one_block(block, race_id)
+            race_df = _parse_one_block(block, race_id, race_date)
             all_rows.append(race_df)
         except ValueError as e:
             raise ValueError(f"{i + 1}番目のレース({race_id}番)の解析に失敗しました: {e}")
