@@ -173,32 +173,55 @@ def lookup_horse_history() -> pd.DataFrame:
     return latest
 
 
+def _normalize_name(name: str) -> str:
+    """馬名の表記ゆれ(全角/半角スペースなど)を吸収するための正規化。"""
+    return str(name).strip().replace("\u3000", "").replace(" ", "")
+
+
 def apply_horse_history(df: pd.DataFrame, history: pd.DataFrame):
     """出走馬テーブルのhorse_nameを使って前走成績(prev_rank)を自動入力する。
 
     見つかった前走のタイム・上がり3F・通過順は、表には出さず
     st.session_state.prev_extra に保存しておき、予測時にこっそり使う。
+    戻り値には、見つからなかった馬名と近い候補(不一致デバッグ用)も含める。
     """
+    import difflib
+
     df = df.copy()
     extra = {}
     matched = 0
+    unmatched_suggestions = {}
+
+    # 正規化した馬名 -> 実際のインデックス名、のマップを作る(表記ゆれ対策)
+    norm_to_actual = {_normalize_name(idx): idx for idx in history.index}
+
     for i, row in df.iterrows():
-        name = str(row.get("horse_name", "")).strip()
-        if not name or name not in history.index:
+        raw_name = str(row.get("horse_name", "")).strip()
+        if not raw_name:
             continue
-        h = history.loc[name]
+        norm_name = _normalize_name(raw_name)
+
+        actual_key = norm_to_actual.get(norm_name)
+        if actual_key is None:
+            # 近い候補があれば提示する(スペルミスや表記ゆれの発見用)
+            close = difflib.get_close_matches(norm_name, norm_to_actual.keys(), n=1, cutoff=0.6)
+            if close:
+                unmatched_suggestions[raw_name] = norm_to_actual[close[0]]
+            continue
+
+        h = history.loc[actual_key]
         if isinstance(h, pd.DataFrame):  # 同名馬が複数いる場合は最初の1件
             h = h.iloc[0]
         if pd.notna(h.get("finish_rank")):
             df.at[i, "prev_rank"] = int(h["finish_rank"])
             matched += 1
-        extra[name] = {
+        extra[raw_name] = {
             "prev_time_sec": h.get("time_sec", 0) if pd.notna(h.get("time_sec")) else 0,
             "prev_agari_3f": h.get("agari_3f", 0) if pd.notna(h.get("agari_3f")) else 0,
             "prev_corner_pos": h.get("corner_pos", 0) if pd.notna(h.get("corner_pos")) else 0,
             "prev_pace_note": h.get("pace_note", PACE_NOTE_NONE) if pd.notna(h.get("pace_note")) else PACE_NOTE_NONE,
         }
-    return df, matched, extra
+    return df, matched, extra, unmatched_suggestions
 
 
 MARKS = ["◎", "○", "▲", "△", "△"]
@@ -475,7 +498,7 @@ def main():
         if history.empty:
             st.warning("過去データが見つかりませんでした(まだ馬名付きのデータが少ない可能性があります)。")
         else:
-            updated, matched, extra = apply_horse_history(edited, history)
+            updated, matched, extra, suggestions = apply_horse_history(edited, history)
             st.session_state.horse_df = updated
             st.session_state.horse_table_version += 1
             st.session_state.prev_extra = extra
@@ -486,6 +509,9 @@ def main():
                     st.caption(f"📝 {name}: 前走の展開評価 → {note}")
             else:
                 st.info("表の馬名と一致する過去データが見つかりませんでした。馬名の表記が過去データと合っているか確認してください。")
+            if suggestions:
+                for typed, close in suggestions.items():
+                    st.warning(f"「{typed}」は見つかりませんでしたが、データ内に似た名前「{close}」があります。表記が違う可能性があります。")
 
     if st.button("予測する", type="primary"):
         if edited.empty:
