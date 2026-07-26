@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 from course_info import COURSE_HILL, COURSE_TURN
@@ -301,6 +301,80 @@ def train(data_path: str, out_path: str, verbose: bool = True) -> dict:
         if verbose:
             print(f"モデルを {out_path} に保存しました")
     return bundle
+
+
+MARKS_FOR_BACKTEST = ["◎", "○", "▲", "△", "△"]
+
+
+def _assign_marks_for_n(n: int) -> list:
+    if n <= 3:
+        marks = MARKS_FOR_BACKTEST[:n]
+    elif n <= 6:
+        marks = MARKS_FOR_BACKTEST[:3]
+    elif n <= 9:
+        marks = MARKS_FOR_BACKTEST[:4]
+    else:
+        marks = MARKS_FOR_BACKTEST[:5]
+    return marks + [""] * (n - len(marks))
+
+
+def backtest(data_path: str, n_splits: int = 5, random_state: int = 42) -> dict:
+    """「そのレースを学習に使わずに予測する」形で、印ごとの的中率を検証する。
+
+    race_id単位でグループ分割(GroupKFold)し、あるレースの結果は
+    そのレースを含まないモデルで予測することで、答えを知った上で
+    予測するズル(データリーク)が起きないようにしている。
+
+    戻り値には、印ごとの複勝率・勝率と、「1番人気を毎回買った場合」との
+    比較、レース数・対象頭数などを含む。
+    """
+    df = load_data(data_path)
+    X, encoders = build_features(df)
+    y = df[TARGET_COL].values
+    race_ids = df["race_id"].values
+
+    unique_races = df["race_id"].nunique()
+    n_splits = max(2, min(n_splits, unique_races))
+
+    oof_proba = np.zeros(len(df))
+    gkf = GroupKFold(n_splits=n_splits)
+    for train_idx, test_idx in gkf.split(X, y, groups=race_ids):
+        model = GradientBoostingClassifier(
+            n_estimators=200, max_depth=3, learning_rate=0.05, random_state=random_state
+        )
+        model.fit(X.iloc[train_idx], y[train_idx])
+        oof_proba[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
+
+    result = df[["race_id", "horse_num", "finish_rank", "popularity"]].copy()
+    result["ai_proba"] = oof_proba
+
+    rows = []
+    for _, g in result.groupby("race_id"):
+        g = g.sort_values("ai_proba", ascending=False).reset_index(drop=True)
+        g["mark"] = _assign_marks_for_n(len(g))
+        rows.append(g)
+    marked = pd.concat(rows, ignore_index=True)
+
+    def _rate(sub, cond_col, cond_val):
+        top3 = (sub["finish_rank"] <= 3).mean()
+        win = (sub["finish_rank"] == 1).mean()
+        return {"件数": len(sub), "複勝率": round(top3, 3), "勝率": round(win, 3)}
+
+    mark_stats = {}
+    for m in ["◎", "○", "▲", "△"]:
+        sub = marked[marked["mark"] == m]
+        if len(sub):
+            mark_stats[m] = _rate(sub, None, None)
+
+    favorite = marked[marked["popularity"] == 1]
+    favorite_stats = _rate(favorite, None, None) if len(favorite) else None
+
+    return {
+        "n_races": unique_races,
+        "n_horses": len(marked),
+        "mark_stats": mark_stats,
+        "favorite_stats": favorite_stats,
+    }
 
 
 def main():
