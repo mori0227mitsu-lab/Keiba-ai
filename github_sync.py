@@ -57,12 +57,18 @@ def append_rows_to_csv(token: str, repo: str, branch: str, path: str, new_rows: 
     df, sha = fetch_csv(token, repo, branch, path)
 
     # 列構成を既存CSVに合わせる(新しい列は追加、足りない列は0で埋める)
+    # 列を揃える時の既定値(数値系の列は0、文字列系の列は空文字にする)
+    text_like_cols = {"race_date", "horse_name", "jockey", "trainer", "venue", "track_type", "condition"}
+
+    def _default_for(col):
+        return "" if col in text_like_cols else 0
+
     for col in new_rows.columns:
         if col not in df.columns:
-            df[col] = 0
+            df[col] = _default_for(col)
     for col in df.columns:
         if col not in new_rows.columns:
-            new_rows[col] = 0
+            new_rows[col] = _default_for(col)
     new_rows = new_rows[df.columns]
 
     # 上書き対象(同じrace_id)の古い行を先に取り除く
@@ -98,7 +104,9 @@ def find_existing_race_ids(
         race_date = race.get("race_date")
         if race_date and "race_date" in df.columns:
             existing_date = df["race_date"].astype(str).str.strip()
-            existing_date = existing_date.replace({"nan": "", "NaT": "", "None": ""})
+            # "0"は、過去のバージョンで列を揃えた際に空欄の代わりに入ってしまった値
+            # (現在は修正済みだが、既存データに残っている可能性があるため空欄扱いにする)
+            existing_date = existing_date.replace({"nan": "", "NaT": "", "None": "", "0": "", "0.0": ""})
             # 既存データの開催日が「空欄(不明)」の行は、日付が違っていても一致とみなす
             # (前回、日付を入力せずに保存したレースを、後から日付ありで上書きできるように)
             date_ok = (existing_date == "") | (existing_date == str(race_date))
