@@ -480,8 +480,10 @@ def main():
                         st.session_state.collect_preview,
                         message=f"Add {n_races} race(s) data",
                     )
-                    st.success(f"GitHubに保存しました!(CSV全体: {total}行)数分後にアプリが再デプロイされます。")
+                    st.toast(f"GitHubに保存しました!(CSV全体: {total}行)数分後にアプリが再デプロイされます。", icon="✅")
                     del st.session_state.collect_preview
+                    st.session_state.collect_paste = ""
+                    st.rerun()
                 except KeyError:
                     st.error(
                         "GitHubのトークンが設定されていません。Streamlit Cloudの「Manage app」→"
@@ -573,6 +575,7 @@ def main():
                     st.session_state.horse_df = parse_netkeiba_shutuba(raw_pasted)
                     st.session_state.horse_table_version += 1
                     st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
+                    st.session_state.raw_paste = ""
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
@@ -590,6 +593,7 @@ def main():
                     st.session_state.horse_df = parse_pasted_csv(pasted)
                     st.session_state.horse_table_version += 1
                     st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
+                    st.session_state.csv_paste = ""
                     st.rerun()
                 except Exception as e:
                     st.error(f"読み込みに失敗しました: {e}")
@@ -665,6 +669,11 @@ def main():
         if edited.empty:
             st.warning("出走馬の情報を入力してください。")
             return
+
+        # 次のレースに備えて、出馬表/CSVの貼り付け欄は空にしておく
+        # (今回の予測結果はこのまま下に表示されるので、ここではrerunしない)
+        st.session_state.raw_paste = ""
+        st.session_state.csv_paste = ""
 
         df = edited.copy()
         df["venue"] = venue
