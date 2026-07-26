@@ -23,7 +23,7 @@ from sklearn.preprocessing import LabelEncoder
 
 CATEGORICAL_COLS = [
     "venue", "track_type", "condition", "sex", "jockey", "running_style",
-    "day_bias", "straight_length", "trainer",
+    "day_bias", "straight_length", "trainer", "prev_pace_note",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる)
@@ -33,6 +33,7 @@ FEATURE_COLS = [
     "weight_carry", "horse_weight", "weight_diff", "popularity",
     # 過去走から引っ張る情報(予測時にも分かる)
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
+    "prev_pace_note",
 ]
 TARGET_COL = "is_top3"
 
@@ -40,26 +41,72 @@ TARGET_COL = "is_top3"
 # (そのレースの結果なので、予測時点では未知)
 RESULT_ONLY_COLS = ["time_sec", "agari_3f", "corner_pos", "finish_rank"]
 
+PACE_NOTE_NONE = "特になし"
+PACE_NOTE_LEADER_GRIT = "強い勝ち方(先行して上がり負けでも勝利)"
+PACE_NOTE_CLOSER_UNLUCKY = "展開不利(上がり1位なのに掲示板外)"
+
+
+def compute_pace_note(df: pd.DataFrame) -> pd.DataFrame:
+    """レースごとに上がり3Fの速さ順位を計算し、展開評価(pace_note)を付ける。
+
+    - 先行勢(逃げ・先行)が、上がり順位は下位(切れなかった)にも関わらず3着以内
+      → 「強い勝ち方」(ハイペースを我慢して押し切った可能性)
+    - 差し・追い込み勢が、上がり順位1位(そのレースで一番切れた)にも関わらず4着以下
+      → 「展開不利」(位置取りや詰まりで恵まれなかった可能性)
+    - それ以外は「特になし」
+    """
+    df = df.copy()
+    if "agari_3f" not in df.columns or "race_id" not in df.columns:
+        df["pace_note"] = PACE_NOTE_NONE
+        return df
+
+    df["pace_note"] = PACE_NOTE_NONE
+
+    def _tag_race(g: pd.DataFrame) -> pd.Series:
+        n = len(g)
+        agari_rank = g["agari_3f"].rank(method="min", ascending=True)  # 1=最速
+        tags = pd.Series(PACE_NOTE_NONE, index=g.index)
+        is_leader = g["running_style"].isin(["逃げ", "先行"])
+        is_closer = g["running_style"].isin(["差し", "追い込み"])
+        top3 = g["finish_rank"] <= 3
+        below_avg_agari = agari_rank > (n / 2)
+        tags[is_leader & top3 & below_avg_agari] = PACE_NOTE_LEADER_GRIT
+        tags[is_closer & (~top3) & (agari_rank == 1)] = PACE_NOTE_CLOSER_UNLUCKY
+        return tags
+
+    if {"running_style", "finish_rank"}.issubset(df.columns):
+        tagged = pd.Series(PACE_NOTE_NONE, index=df.index)
+        for _, g in df.groupby("race_id", group_keys=False):
+            tagged.loc[g.index] = _tag_race(g)
+        df["pace_note"] = tagged
+    return df
+
 
 def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
     """馬名(horse_name)を手がかりに、同じ馬の「前走」情報を自動で埋める。
 
     race_idの順序を時系列とみなし、各馬の1つ前のレースの
-    着順・タイム・上がり3F・コーナー通過順を prev_* 列に入れる。
-    初出走(前走なし)の馬は0のまま(=不明を表す)。
+    着順・タイム・上がり3F・コーナー通過順・展開評価を prev_* 列に入れる。
+    初出走(前走なし)の馬は既定値のまま(=不明を表す)。
     """
     df = df.copy()
+    df = compute_pace_note(df)
+
     if "horse_name" not in df.columns:
         # 馬名が無いデータでは何もしない(既存のprev_rank等をそのまま使う)
         for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
             if col not in df.columns:
                 df[col] = 0.0
+        if "prev_pace_note" not in df.columns:
+            df["prev_pace_note"] = PACE_NOTE_NONE
         return df
 
     df = df.sort_values(["race_id"]).reset_index(drop=True)
     for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
         if col not in df.columns:
             df[col] = 0.0
+    if "prev_pace_note" not in df.columns:
+        df["prev_pace_note"] = PACE_NOTE_NONE
 
     # 馬ごとに、1つ前のレースの結果をシフトして取り込む
     grouped = df.groupby("horse_name", sort=False)
@@ -73,6 +120,10 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
             shifted = grouped[src].shift(1)
             # 前走がある行だけ上書きする(無い行は0=不明のまま)
             df[dst] = shifted.fillna(df[dst]).fillna(0)
+
+    if "pace_note" in df.columns:
+        shifted_pace = grouped["pace_note"].shift(1)
+        df["prev_pace_note"] = shifted_pace.fillna(PACE_NOTE_NONE)
 
     return df
 
@@ -97,6 +148,8 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
             df[col] = default
     if "trainer" not in df.columns:
         df["trainer"] = "UNK"
+    if "prev_pace_note" not in df.columns:
+        df["prev_pace_note"] = PACE_NOTE_NONE
 
     fitted = encoders is None
     if encoders is None:
