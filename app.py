@@ -20,7 +20,7 @@ import streamlit as st
 
 from model.train_model import (
     FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
-    PACE_NOTE_NONE, APTITUDE_UNKNOWN,
+    PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest,
 )
 from data_collector import parse_netkeiba_result
 from github_sync import append_rows_to_csv
@@ -459,6 +459,43 @@ def main():
                     )
                 except Exception as e:
                     st.error(f"保存に失敗しました: {e}")
+
+    with st.expander("📊 的中率を確認する(バックテスト)"):
+        st.caption(
+            "今まで貯まったデータを使い、「そのレースを学習に使わずに予測する」形で"
+            "印(◎○▲△)ごとの複勝率・勝率を検証します。データが増えるほど信頼できる結果になります。"
+        )
+        if st.button("バックテストを実行"):
+            with st.spinner("検証中です(データ量によって数秒〜数十秒かかります)..."):
+                try:
+                    st.session_state.backtest_result = backtest(DATA_PATH)
+                except Exception as e:
+                    st.error(f"検証に失敗しました: {e}")
+
+        if "backtest_result" in st.session_state:
+            r = st.session_state.backtest_result
+            st.caption(f"対象: {r['n_races']}レース・{r['n_horses']}頭")
+
+            rows = []
+            for mark, stats in r["mark_stats"].items():
+                rows.append({
+                    "印": mark, "件数": stats["件数"],
+                    "複勝率": f"{stats['複勝率']*100:.1f}%",
+                    "勝率": f"{stats['勝率']*100:.1f}%",
+                })
+            if r["favorite_stats"]:
+                fs = r["favorite_stats"]
+                rows.append({
+                    "印": "(参考)1番人気", "件数": fs["件数"],
+                    "複勝率": f"{fs['複勝率']*100:.1f}%",
+                    "勝率": f"{fs['勝率']*100:.1f}%",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption(
+                "「(参考)1番人気」は、毎回オッズ1番人気の馬を買った場合の成績です。"
+                "◎の成績がこれを上回っていれば、AIの予測が市場の評価に対して"
+                "何らかの上乗せ価値を出せている、という目安になります。"
+            )
 
     section_head("1", "レース条件")
     col0, col1, col2, col3 = st.columns(4)
