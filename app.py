@@ -422,6 +422,9 @@ def main():
     with st.spinner("モデルを準備しています..."):
         bundle = load_model(FEATURE_HASH)
 
+    if "collect_paste_version" not in st.session_state:
+        st.session_state.collect_paste_version = 0
+
     with st.expander("📥 データを集める(結果ページを貼り付けて自動保存)", expanded=True):
         st.caption(
             "netkeibaの「結果」ページの表をコピーして貼り付けると、解析してGitHub上の"
@@ -439,7 +442,7 @@ def main():
 
         collect_text = st.text_area(
             "netkeibaの結果ページ(複数レース分をまとめて貼り付けてもOK)",
-            height=200, key="collect_paste",
+            height=200, key=f"collect_paste_{st.session_state.collect_paste_version}",
         )
 
         if st.button("プレビュー"):
@@ -483,7 +486,7 @@ def main():
                     )
                     st.toast(f"GitHubに保存しました!(CSV全体: {total}行)数分後にアプリが再デプロイされます。", icon="✅")
                     del st.session_state.collect_preview
-                    st.session_state.collect_paste = ""
+                    st.session_state.collect_paste_version += 1
                     save_succeeded = True
                 except KeyError:
                     st.error(
@@ -566,6 +569,10 @@ def main():
         st.session_state.horse_df = DEFAULT_ROWS.copy()
     if "horse_table_version" not in st.session_state:
         st.session_state.horse_table_version = 0
+    if "raw_paste_version" not in st.session_state:
+        st.session_state.raw_paste_version = 0
+    if "csv_paste_version" not in st.session_state:
+        st.session_state.csv_paste_version = 0
 
     with st.expander("💡 出走馬をまとめて入力する(手入力の手間を減らせます)", expanded=True):
         tab1, tab2 = st.tabs(["netkeibaの出馬表を貼り付け", "CSVを貼り付け"])
@@ -575,14 +582,17 @@ def main():
                 "netkeibaアプリ/サイトの「出馬表」ページで、表の部分を選択してコピーし、"
                 "そのままここに貼り付けてください。"
             )
-            raw_pasted = st.text_area("netkeiba出馬表", height=150, key="raw_paste")
+            raw_pasted = st.text_area(
+                "netkeiba出馬表", height=150,
+                key=f"raw_paste_{st.session_state.raw_paste_version}",
+            )
             if st.button("表に反映", key="raw_apply"):
                 apply_succeeded = False
                 try:
                     st.session_state.horse_df = parse_netkeiba_shutuba(raw_pasted)
                     st.session_state.horse_table_version += 1
                     st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
-                    st.session_state.raw_paste = ""
+                    st.session_state.raw_paste_version += 1
                     apply_succeeded = True
                 except Exception as e:
                     st.error(str(e))
@@ -596,14 +606,17 @@ def main():
                 "weight_diff, prev_rank, rest_weeks, popularity, odds "
                 "の一部だけでもOKです(無い列は既定値で埋めます)。"
             )
-            pasted = st.text_area("CSVテキスト", height=120, key="csv_paste")
+            pasted = st.text_area(
+                "CSVテキスト", height=120,
+                key=f"csv_paste_{st.session_state.csv_paste_version}",
+            )
             if st.button("表に反映", key="csv_apply"):
                 apply_succeeded = False
                 try:
                     st.session_state.horse_df = parse_pasted_csv(pasted)
                     st.session_state.horse_table_version += 1
                     st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
-                    st.session_state.csv_paste = ""
+                    st.session_state.csv_paste_version += 1
                     apply_succeeded = True
                 except Exception as e:
                     st.error(f"読み込みに失敗しました: {e}")
@@ -683,9 +696,10 @@ def main():
             return
 
         # 次のレースに備えて、出馬表/CSVの貼り付け欄は空にしておく
-        # (今回の予測結果はこのまま下に表示されるので、ここではrerunしない)
-        st.session_state.raw_paste = ""
-        st.session_state.csv_paste = ""
+        # (今回の予測結果はこのまま下に表示されるので、ここではrerunしない。
+        #  次の画面表示から新しいキーの空欄になる)
+        st.session_state.raw_paste_version += 1
+        st.session_state.csv_paste_version += 1
 
         df = edited.copy()
         df["venue"] = venue
