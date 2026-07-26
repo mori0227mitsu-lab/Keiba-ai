@@ -64,3 +64,14 @@ def append_rows_to_csv(token: str, repo: str, branch: str, path: str, new_rows: 
     combined = pd.concat([df, new_rows], ignore_index=True)
     update_csv(token, repo, branch, path, combined, sha, message)
     return len(combined)
+
+
+def get_next_race_id(token: str, repo: str, branch: str, path: str, default: int = 9001) -> int:
+    """既存CSVの最大race_idの次の番号を返す(race_idの重複・手入力ミスを防ぐため)。"""
+    try:
+        df, _ = fetch_csv(token, repo, branch, path)
+        if "race_id" in df.columns and len(df):
+            return int(df["race_id"].max()) + 1
+    except Exception:
+        pass
+    return default
