@@ -41,6 +41,19 @@ TARGET_COL = "is_top3"
 # (そのレースの結果なので、予測時点では未知)
 RESULT_ONLY_COLS = ["time_sec", "agari_3f", "corner_pos", "finish_rank"]
 
+# CSVファイル自体に実際に保存されているべき「生の列」。
+# prev_time_sec / prev_agari_3f / prev_corner_pos / prev_pace_note は
+# fill_prev_from_history() / compute_pace_note() でその場で計算される列であり、
+# CSVファイルには存在しないため、ここには含めない。
+# (FEATURE_COLS全体をCSVの列チェックに使うと、常に「列不足」と誤判定され、
+#  実データがダミーデータで上書きされてしまう重大なバグの原因になるので注意)
+RAW_REQUIRED_COLS = [
+    "venue", "distance", "track_type", "condition", "straight_length", "day_bias",
+    "waku", "age", "sex", "jockey", "trainer", "running_style",
+    "weight_carry", "horse_weight", "weight_diff", "popularity",
+    "prev_rank", "rest_weeks",
+]
+
 PACE_NOTE_NONE = "特になし"
 PACE_NOTE_LEADER_GRIT = "強い勝ち方(先行して上がり負けでも勝利)"
 PACE_NOTE_CLOSER_UNLUCKY = "展開不利(上がり1位なのに掲示板外)"
