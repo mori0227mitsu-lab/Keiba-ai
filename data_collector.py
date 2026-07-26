@@ -71,12 +71,9 @@ def _styles_from_corner(pos_list):
     return out
 
 
-def parse_netkeiba_result(text: str, race_id: int) -> pd.DataFrame:
-    """netkeibaの結果ページの生テキストを、CSV_COLS形式のDataFrameに変換する。
-
-    1レース分のテキストを想定(複数レースが混ざっている場合は最初の1レース分のみ)。
-    """
-    hm = HEADER_RE.search(text)
+def _parse_one_block(block: str, race_id: int) -> pd.DataFrame:
+    """1レース分のブロックをCSV_COLS形式のDataFrameに変換する(内部用)。"""
+    hm = HEADER_RE.search(block)
     if not hm:
         raise ValueError(
             "レース条件(距離・コース種別・馬場状態・開催場)を認識できませんでした。"
@@ -88,7 +85,7 @@ def parse_netkeiba_result(text: str, race_id: int) -> pd.DataFrame:
     distance = hm.group("distance")
     straight = COURSE_STRAIGHT_LENGTH.get(venue, "普通")
 
-    horses = list(HORSE_RE.finditer(text))
+    horses = list(HORSE_RE.finditer(block))
     if not horses:
         raise ValueError(
             "出走馬の結果テーブルを認識できませんでした。ページのレイアウトが"
@@ -136,3 +133,39 @@ def parse_netkeiba_result(text: str, race_id: int) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)[CSV_COLS]
+
+
+def parse_netkeiba_result(text: str, race_id: int) -> pd.DataFrame:
+    """netkeibaの結果ページの生テキストを、CSV_COLS形式のDataFrameに変換する。
+
+    1レース分のテキストを想定(複数レースが混ざっている場合は最初の1レース分のみ)。
+    複数レースまとめて処理したい場合は parse_netkeiba_results_multi() を使う。
+    """
+    return _parse_one_block(text, race_id)
+
+
+def parse_netkeiba_results_multi(text: str, start_race_id: int) -> pd.DataFrame:
+    """複数レース分のnetkeiba結果ページを、まとめて貼り付けても一括処理する。
+
+    「発走 / 芝1200m ... 馬場:良」のようなヘッダー行が出現する回数だけ
+    レースがあるとみなし、race_idは start_race_id から1つずつ増やして割り振る。
+    """
+    header_matches = list(HEADER_RE.finditer(text))
+    if not header_matches:
+        raise ValueError(
+            "レース条件(「発走 / 芝1200m ... 馬場:良」のような行)を1つも認識できませんでした。"
+        )
+
+    all_rows = []
+    for i, hm in enumerate(header_matches):
+        start = hm.start()
+        end = header_matches[i + 1].start() if i + 1 < len(header_matches) else len(text)
+        block = text[start:end]
+        race_id = start_race_id + i
+        try:
+            race_df = _parse_one_block(block, race_id)
+            all_rows.append(race_df)
+        except ValueError as e:
+            raise ValueError(f"{i + 1}番目のレース({race_id}番)の解析に失敗しました: {e}")
+
+    return pd.concat(all_rows, ignore_index=True)
