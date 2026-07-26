@@ -450,7 +450,8 @@ def main():
                 try:
                     st.session_state.horse_df = parse_netkeiba_shutuba(raw_pasted)
                     st.session_state.horse_table_version += 1
-                    st.success(f"{len(st.session_state.horse_df)}頭分を表に反映しました。")
+                    st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
+                    st.rerun()
                 except Exception as e:
                     st.error(str(e))
 
@@ -466,7 +467,8 @@ def main():
                 try:
                     st.session_state.horse_df = parse_pasted_csv(pasted)
                     st.session_state.horse_table_version += 1
-                    st.success(f"{len(st.session_state.horse_df)}頭分を表に反映しました。")
+                    st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"読み込みに失敗しました: {e}")
 
@@ -499,22 +501,33 @@ def main():
     if st.button("🔎 馬名から前走成績を自動入力"):
         history = lookup_horse_history()
         if history.empty:
-            st.warning("過去データが見つかりませんでした(まだ馬名付きのデータが少ない可能性があります)。")
+            st.session_state.autofill_msg = ("warning", "過去データが見つかりませんでした(まだ馬名付きのデータが少ない可能性があります)。")
+            st.session_state.autofill_notes = {}
+            st.session_state.autofill_suggestions = {}
         else:
             updated, matched, extra, suggestions = apply_horse_history(edited, history)
             st.session_state.horse_df = updated
             st.session_state.horse_table_version += 1
             st.session_state.prev_extra = extra
+            st.session_state.autofill_notes = {
+                n: e["prev_pace_note"] for n, e in extra.items()
+                if e.get("prev_pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE
+            }
+            st.session_state.autofill_suggestions = suggestions
             if matched:
-                st.success(f"{matched}頭分、前走成績を反映しました(表の「前走着順」を確認してください)。")
-                notes = {n: e["prev_pace_note"] for n, e in extra.items() if e.get("prev_pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE}
-                for name, note in notes.items():
-                    st.caption(f"📝 {name}: 前走の展開評価 → {note}")
+                st.session_state.autofill_msg = ("success", f"{matched}頭分、前走成績を反映しました(表の「前走着順」を確認してください)。")
             else:
-                st.info("表の馬名と一致する過去データが見つかりませんでした。馬名の表記が過去データと合っているか確認してください。")
-            if suggestions:
-                for typed, close in suggestions.items():
-                    st.warning(f"「{typed}」は見つかりませんでしたが、データ内に似た名前「{close}」があります。表記が違う可能性があります。")
+                st.session_state.autofill_msg = ("info", "表の馬名と一致する過去データが見つかりませんでした。馬名の表記が過去データと合っているか確認してください。")
+        st.rerun()
+
+    # ボタンを押した結果は、rerun後もこのブロックで表示し続ける(reranしても消えないように)
+    if "autofill_msg" in st.session_state:
+        kind, msg = st.session_state.autofill_msg
+        getattr(st, kind)(msg)
+        for name, note in st.session_state.get("autofill_notes", {}).items():
+            st.caption(f"📝 {name}: 前走の展開評価 → {note}")
+        for typed, close in st.session_state.get("autofill_suggestions", {}).items():
+            st.warning(f"「{typed}」は見つかりませんでしたが、データ内に似た名前「{close}」があります。表記が違う可能性があります。")
 
     if st.button("予測する", type="primary"):
         if edited.empty:
