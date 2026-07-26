@@ -65,6 +65,26 @@ PACE_NOTE_LEADER_GRIT = "強い勝ち方(先行して上がり負けでも勝利
 PACE_NOTE_CLOSER_UNLUCKY = "展開不利(上がり1位なのに掲示板外)"
 
 
+def add_chronological_sort_key(df: pd.DataFrame) -> pd.DataFrame:
+    """race_date(あれば)とrace_idから、時系列の並び替え用キー(_chron_key)を作る。
+
+    - race_dateが正しく解釈できる行は、その日付を使って並べる
+      (同じ日付が複数あればrace_idで細かく並べる)
+    - race_dateが無い/解釈できない行(古い形式のデータ)はrace_idだけで並べる
+    - 「日付が分かる行」は「日付が分からない行」より必ず後ろに来るようにする
+      (これまでrace_id順で貯めてきたデータの方が、日付管理を始める前の
+       古いデータである、という前提に基づく)
+    """
+    df = df.copy()
+    if "race_date" in df.columns:
+        parsed = pd.to_datetime(df["race_date"], errors="coerce")
+    else:
+        parsed = pd.Series(pd.NaT, index=df.index)
+    has_date = parsed.notna()
+    df["_chron_key"] = list(zip(has_date, parsed.fillna(pd.Timestamp.min), df["race_id"]))
+    return df
+
+
 APTITUDE_UNKNOWN = "データ不足"
 APTITUDE_DIFF_THRESHOLD = 0.34  # 複勝率の差がこれ以上あれば「得意/不得意」と判定する目安
 
@@ -84,10 +104,10 @@ def compute_horse_course_aptitude(df: pd.DataFrame) -> pd.DataFrame:
 
     df["turn_direction"] = df["venue"].map(COURSE_TURN).fillna("右")
     df["hill"] = df["venue"].map(COURSE_HILL).fillna("坂なし")
-    is_top3 = (df["finish_rank"] <= 3).astype(int)
 
-    df = df.sort_values("race_id").reset_index(drop=True)
-    is_top3 = is_top3.reindex(df.index)
+    df = add_chronological_sort_key(df)
+    df = df.sort_values("_chron_key").reset_index(drop=True)
+    is_top3 = (df["finish_rank"] <= 3).astype(int)
 
     turn_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
     hill_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
@@ -187,7 +207,8 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
             df["prev_pace_note"] = PACE_NOTE_NONE
         return df
 
-    df = df.sort_values(["race_id"]).reset_index(drop=True)
+    df = add_chronological_sort_key(df)
+    df = df.sort_values("_chron_key").reset_index(drop=True)
     for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
         if col not in df.columns:
             df[col] = 0.0
