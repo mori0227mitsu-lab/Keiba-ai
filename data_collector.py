@@ -29,6 +29,13 @@ HORSE_RE = re.compile(
     re.MULTILINE,
 )
 
+# 「コーナー通過順位」セクション(表とは別に、レースページ下部に載っている形式)
+# 例:
+#   コーナー通過順位
+#   3コーナー	(*1,3)(7,8)(2,6)5=(4,9)
+#   4コーナー	(*1,3)(6,7)8,2-5-4-9
+CORNER_LINE_RE = re.compile(r"([1-4])コーナー\t([^\n]*)\n")
+
 MARKS = "▲△☆★◇"
 COND_FIX = {"稍": "稍重", "不": "不良"}
 
@@ -59,7 +66,14 @@ def _time_to_sec(t: str):
 
 
 def _styles_from_corner(pos_list):
+    """コーナー通過順位から、レース内での相対的な脚質を判定する。
+
+    全馬とも通過順位が無い(netkeiba側にまだ反映されていない等)場合は、
+    でたらめな判定を避けるため、全馬Noneを返す(呼び出し側で「不明」扱いにする)。
+    """
     n = len(pos_list)
+    if all(p == 999 for p in pos_list):
+        return [None] * n
     order = sorted(range(n), key=lambda i: pos_list[i])
     rank = [0] * n
     for r, i in enumerate(order):
@@ -69,6 +83,76 @@ def _styles_from_corner(pos_list):
         p = r / n
         out.append("逃げ" if p <= 0.25 else "先行" if p <= 0.5 else "差し" if p <= 0.75 else "追い込み")
     return out
+
+
+def _parse_corner_group_string(s: str) -> dict:
+    """(*1,3)(7,8)(2,6)5=(4,9) のような表記から、馬番->順位(1が先頭)のdictを作る。
+
+    カッコでまとめられた馬は「ほぼ同じ位置」を表すので、同じ順位番号にする。
+    """
+    s = s.replace("*", "")
+    tokens = re.findall(r"\([\d,]+\)|\d+", s)
+    result = {}
+    rank = 0
+    for tok in tokens:
+        rank += 1
+        nums = [int(x) for x in re.findall(r"\d+", tok)]
+        for n in nums:
+            result[n] = rank
+    return result
+
+
+def _extract_corner_section(block: str) -> dict:
+    """ブロック内に「コーナー通過順位」セクションがあれば、
+    最終コーナー(一番大きい番号のもの)の内容を 馬番->順位 のdictにして返す。
+    セクションが無い/内容が空の場合は空dictを返す。
+    """
+    lines = dict(CORNER_LINE_RE.findall(block))
+    for corner_num in ("4", "3", "2", "1"):
+        content = lines.get(corner_num, "").strip()
+        if content:
+            return _parse_corner_group_string(content)
+    return {}
+
+
+def apply_corner_section_to_df(df: pd.DataFrame, corner_text: str, race_id: int) -> pd.DataFrame:
+    """既に作成済みのDataFrame(プレビュー結果)に対して、
+    あとから貼り付けた「コーナー通過順位」セクションを反映する。
+
+    指定したrace_idの行だけを対象に、馬番から通過順位を引いてcorner_posを更新し、
+    そのレース内のrunning_styleも再計算する。
+    """
+    df = df.copy()
+    corner_section = _extract_corner_section(corner_text)
+    if not corner_section:
+        raise ValueError(
+            "「Nコーナー\\t(内容)」の形式を認識できませんでした。"
+            "「コーナー通過順位」の行から、1〜4コーナー分をまとめて貼り付けてください。"
+        )
+
+    mask = df["race_id"] == race_id
+    if not mask.any():
+        raise ValueError(f"race_id={race_id} の行が見つかりませんでした。")
+
+    sub = df.loc[mask].copy()
+    updated_count = 0
+    for i in sub.index:
+        num = int(sub.at[i, "horse_num"])
+        if num in corner_section:
+            df.at[i, "corner_pos"] = corner_section[num]
+            updated_count += 1
+
+    if updated_count == 0:
+        raise ValueError("貼り付けたコーナー通過順位に、該当する馬番が見つかりませんでした。")
+
+    # このレース内で脚質を再計算する
+    sub = df.loc[mask]
+    corners = [int(c) if pd.notna(c) else 999 for c in sub["corner_pos"]]
+    styles = _styles_from_corner(corners)
+    for i, style in zip(sub.index, styles):
+        df.at[i, "running_style"] = style if style is not None else "不明"
+
+    return df
 
 
 def _parse_one_block(block: str, race_id: int, race_date: str = "") -> pd.DataFrame:
@@ -92,11 +176,19 @@ def _parse_one_block(block: str, race_id: int, race_date: str = "") -> pd.DataFr
             "想定と違う可能性があります。"
         )
 
+    corner_section = _extract_corner_section(block)
+
     corners = []
     for h in horses:
         c = h.group("corner")
         last = c.split("-")[-1] if c else ""
-        corners.append(int(last) if last.isdigit() else 999)
+        if last.isdigit():
+            corners.append(int(last))
+        elif corner_section and int(h.group("num")) in corner_section:
+            # 行内に無ければ、「コーナー通過順位」セクションの値で補う
+            corners.append(corner_section[int(h.group("num"))])
+        else:
+            corners.append(999)
     styles = _styles_from_corner(corners)
 
     rows = []
@@ -119,7 +211,7 @@ def _parse_one_block(block: str, race_id: int, race_date: str = "") -> pd.DataFr
             "age": int(h.group("age")),
             "jockey": _clean(h.group("jockey")),
             "trainer": _clean(h.group("trainer")),
-            "running_style": style,
+            "running_style": style if style is not None else "不明",
             "weight_carry": float(h.group("wc")),
             "horse_weight": int(h.group("weight")),
             "weight_diff": int(h.group("wdiff")),
