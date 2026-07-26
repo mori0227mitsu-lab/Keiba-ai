@@ -22,8 +22,8 @@ from model.train_model import (
     FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
     PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest,
 )
-from data_collector import parse_netkeiba_result
-from github_sync import append_rows_to_csv
+from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi
+from github_sync import append_rows_to_csv, get_next_race_id
 from course_info import (
     COURSE_DISTANCES,
     COURSE_HILL,
@@ -422,19 +422,48 @@ def main():
     with st.spinner("モデルを準備しています..."):
         bundle = load_model(FEATURE_HASH)
 
-    with st.expander("📥 データを集める(結果ページを貼り付けて自動保存)"):
+    with st.expander("📥 データを集める(結果ページを貼り付けて自動保存)", expanded=True):
         st.caption(
             "netkeibaの「結果」ページの表をコピーして貼り付けると、解析してGitHub上の"
-            "data/dummy_races.csvに追記できます(Streamlit Cloud側にgithub_tokenの設定が必要です)。"
+            "data/dummy_races.csvに追記できます。**複数レース分をまとめて貼り付けてもOK**です"
+            "(「発走」を含む行の数だけレースを自動で見つけます)。"
         )
-        collect_race_id = st.number_input("この結果のrace_id(既存と重複しない番号)", min_value=1, value=9001, step=1)
-        collect_text = st.text_area("netkeibaの結果ページ", height=150, key="collect_paste")
+
+        colA, colB = st.columns([2, 1])
+        with colA:
+            use_auto_id = st.checkbox("race_idを自動で決める(推奨)", value=True)
+        with colB:
+            manual_start_id = st.number_input(
+                "開始race_id", min_value=1, value=9001, step=1, disabled=use_auto_id,
+            )
+
+        collect_text = st.text_area(
+            "netkeibaの結果ページ(複数レース分をまとめて貼り付けてもOK)",
+            height=200, key="collect_paste",
+        )
 
         if st.button("プレビュー"):
             try:
-                preview_df = parse_netkeiba_result(collect_text, race_id=int(collect_race_id))
+                if use_auto_id:
+                    token = st.secrets["github_token"]
+                    repo = st.secrets["github_repo"]
+                    branch = st.secrets.get("github_branch", "main")
+                    start_id = get_next_race_id(token, repo, branch, "data/dummy_races.csv")
+                else:
+                    start_id = int(manual_start_id)
+
+                preview_df = parse_netkeiba_results_multi(collect_text, start_race_id=start_id)
                 st.session_state.collect_preview = preview_df
-                st.success(f"{len(preview_df)}頭分を解析しました。内容を確認してから保存してください。")
+                n_races = preview_df["race_id"].nunique()
+                st.success(
+                    f"{n_races}レース・{len(preview_df)}頭分を解析しました"
+                    f"(race_id {start_id}〜{start_id + n_races - 1})。内容を確認してから保存してください。"
+                )
+            except KeyError:
+                st.error(
+                    "GitHubのトークンが設定されていないため、race_idを自動で決められません。"
+                    "「race_idを自動で決める」のチェックを外して、開始race_idを手入力してください。"
+                )
             except Exception as e:
                 st.error(str(e))
 
@@ -445,10 +474,11 @@ def main():
                     token = st.secrets["github_token"]
                     repo = st.secrets["github_repo"]
                     branch = st.secrets.get("github_branch", "main")
+                    n_races = st.session_state.collect_preview["race_id"].nunique()
                     total = append_rows_to_csv(
                         token, repo, branch, "data/dummy_races.csv",
                         st.session_state.collect_preview,
-                        message=f"Add race {int(collect_race_id)} data",
+                        message=f"Add {n_races} race(s) data",
                     )
                     st.success(f"GitHubに保存しました!(CSV全体: {total}行)数分後にアプリが再デプロイされます。")
                     del st.session_state.collect_preview
