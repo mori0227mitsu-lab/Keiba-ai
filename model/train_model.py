@@ -21,19 +21,25 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
+from course_info import COURSE_HILL, COURSE_TURN
+
 CATEGORICAL_COLS = [
     "venue", "track_type", "condition", "sex", "jockey", "running_style",
     "day_bias", "straight_length", "trainer", "prev_pace_note",
+    "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
 ]
 FEATURE_COLS = [
-    # レース条件(その場で分かる)
+    # レース条件(その場で分かる/固定知識)
     "venue", "distance", "track_type", "condition", "straight_length", "day_bias",
+    "turn_direction", "hill",
     # 馬の基本情報(その場で分かる)
     "waku", "age", "sex", "jockey", "trainer", "running_style",
     "weight_carry", "horse_weight", "weight_diff", "popularity",
     # 過去走から引っ張る情報(予測時にも分かる)
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
     "prev_pace_note",
+    # 馬ごとの右左回り・坂の得意不得意(過去の全成績から判定)
+    "horse_turn_aptitude", "horse_hill_aptitude",
 ]
 TARGET_COL = "is_top3"
 
@@ -57,6 +63,73 @@ RAW_REQUIRED_COLS = [
 PACE_NOTE_NONE = "特になし"
 PACE_NOTE_LEADER_GRIT = "強い勝ち方(先行して上がり負けでも勝利)"
 PACE_NOTE_CLOSER_UNLUCKY = "展開不利(上がり1位なのに掲示板外)"
+
+
+APTITUDE_UNKNOWN = "データ不足"
+APTITUDE_DIFF_THRESHOLD = 0.34  # 複勝率の差がこれ以上あれば「得意/不得意」と判定する目安
+
+
+def compute_horse_course_aptitude(df: pd.DataFrame) -> pd.DataFrame:
+    """馬ごとに、右回り/左回り・坂あり/坂なしの複勝率を比較し、得意不得意を判定する。
+
+    判定には「そのレースより前の成績だけ」を使う(未来の結果を見てしまう
+    データリークを防ぐため)。判定に十分な過去走(各条件1走以上)が無い場合は
+    「データ不足」のままにする。
+    """
+    df = df.copy()
+    if not {"horse_name", "venue", "finish_rank", "race_id"}.issubset(df.columns):
+        df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
+        df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
+        return df
+
+    df["turn_direction"] = df["venue"].map(COURSE_TURN).fillna("右")
+    df["hill"] = df["venue"].map(COURSE_HILL).fillna("坂なし")
+    is_top3 = (df["finish_rank"] <= 3).astype(int)
+
+    df = df.sort_values("race_id").reset_index(drop=True)
+    is_top3 = is_top3.reindex(df.index)
+
+    turn_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
+    hill_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
+
+    for _, g in df.groupby("horse_name", sort=False):
+        idx = g.index.tolist()
+        for pos, i in enumerate(idx):
+            past_idx = idx[:pos]
+            if len(past_idx) < 2:
+                continue  # 過去走が少なすぎる場合は判定しない
+
+            cur_turn = df.at[i, "turn_direction"]
+            cur_hill = df.at[i, "hill"]
+            past_turn = df.loc[past_idx, "turn_direction"]
+            past_hill = df.loc[past_idx, "hill"]
+            past_top3 = is_top3.loc[past_idx]
+
+            same_turn = past_top3[past_turn == cur_turn]
+            diff_turn = past_top3[past_turn != cur_turn]
+            if len(same_turn) >= 1 and len(diff_turn) >= 1:
+                gap = same_turn.mean() - diff_turn.mean()
+                if gap >= APTITUDE_DIFF_THRESHOLD:
+                    turn_apt.at[i] = f"得意({cur_turn}回り好走歴あり)"
+                elif gap <= -APTITUDE_DIFF_THRESHOLD:
+                    turn_apt.at[i] = f"不得意({cur_turn}回り苦手傾向)"
+                else:
+                    turn_apt.at[i] = "差なし"
+
+            same_hill = past_top3[past_hill == cur_hill]
+            diff_hill = past_top3[past_hill != cur_hill]
+            if len(same_hill) >= 1 and len(diff_hill) >= 1:
+                gap = same_hill.mean() - diff_hill.mean()
+                if gap >= APTITUDE_DIFF_THRESHOLD:
+                    hill_apt.at[i] = f"得意({cur_hill}好走歴あり)"
+                elif gap <= -APTITUDE_DIFF_THRESHOLD:
+                    hill_apt.at[i] = f"不得意({cur_hill}苦手傾向)"
+                else:
+                    hill_apt.at[i] = "差なし"
+
+    df["horse_turn_aptitude"] = turn_apt
+    df["horse_hill_aptitude"] = hill_apt
+    return df
 
 
 def compute_pace_note(df: pd.DataFrame) -> pd.DataFrame:
@@ -144,6 +217,7 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = fill_prev_from_history(df)
+    df = compute_horse_course_aptitude(df)
     df[TARGET_COL] = (df["finish_rank"] <= 3).astype(int)
     return df
 
@@ -163,6 +237,14 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         df["trainer"] = "UNK"
     if "prev_pace_note" not in df.columns:
         df["prev_pace_note"] = PACE_NOTE_NONE
+    if "turn_direction" not in df.columns:
+        df["turn_direction"] = df["venue"].map(COURSE_TURN).fillna("右") if "venue" in df.columns else "右"
+    if "hill" not in df.columns:
+        df["hill"] = df["venue"].map(COURSE_HILL).fillna("坂なし") if "venue" in df.columns else "坂なし"
+    if "horse_turn_aptitude" not in df.columns:
+        df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
+    if "horse_hill_aptitude" not in df.columns:
+        df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
 
     fitted = encoders is None
     if encoders is None:
