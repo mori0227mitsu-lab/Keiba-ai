@@ -470,6 +470,7 @@ def main():
         if "collect_preview" in st.session_state:
             st.dataframe(st.session_state.collect_preview, use_container_width=True)
             if st.button("✅ GitHubに保存する", type="primary"):
+                save_succeeded = False
                 try:
                     token = st.secrets["github_token"]
                     repo = st.secrets["github_repo"]
@@ -483,7 +484,7 @@ def main():
                     st.toast(f"GitHubに保存しました!(CSV全体: {total}行)数分後にアプリが再デプロイされます。", icon="✅")
                     del st.session_state.collect_preview
                     st.session_state.collect_paste = ""
-                    st.rerun()
+                    save_succeeded = True
                 except KeyError:
                     st.error(
                         "GitHubのトークンが設定されていません。Streamlit Cloudの「Manage app」→"
@@ -491,6 +492,11 @@ def main():
                     )
                 except Exception as e:
                     st.error(f"保存に失敗しました: {e}")
+
+                # st.rerun()はtry/exceptの外で呼ぶ(内部的な例外がexceptに
+                # 誤って捕まり、成功時にもエラー表示が出てしまうのを防ぐため)
+                if save_succeeded:
+                    st.rerun()
 
     with st.expander("📊 的中率を確認する(バックテスト)"):
         st.caption(
@@ -571,14 +577,17 @@ def main():
             )
             raw_pasted = st.text_area("netkeiba出馬表", height=150, key="raw_paste")
             if st.button("表に反映", key="raw_apply"):
+                apply_succeeded = False
                 try:
                     st.session_state.horse_df = parse_netkeiba_shutuba(raw_pasted)
                     st.session_state.horse_table_version += 1
                     st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
                     st.session_state.raw_paste = ""
-                    st.rerun()
+                    apply_succeeded = True
                 except Exception as e:
                     st.error(str(e))
+                if apply_succeeded:
+                    st.rerun()
 
         with tab2:
             st.caption(
@@ -589,14 +598,17 @@ def main():
             )
             pasted = st.text_area("CSVテキスト", height=120, key="csv_paste")
             if st.button("表に反映", key="csv_apply"):
+                apply_succeeded = False
                 try:
                     st.session_state.horse_df = parse_pasted_csv(pasted)
                     st.session_state.horse_table_version += 1
                     st.toast(f"{len(st.session_state.horse_df)}頭分を表に反映しました。", icon="✅")
                     st.session_state.csv_paste = ""
-                    st.rerun()
+                    apply_succeeded = True
                 except Exception as e:
                     st.error(f"読み込みに失敗しました: {e}")
+                if apply_succeeded:
+                    st.rerun()
 
     st.caption("表を直接編集できます。行の追加・削除も可能です。")
 
