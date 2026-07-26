@@ -18,12 +18,17 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-from model.train_model import FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note, PACE_NOTE_NONE
+from model.train_model import (
+    FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
+    PACE_NOTE_NONE, APTITUDE_UNKNOWN,
+)
 from data_collector import parse_netkeiba_result
 from github_sync import append_rows_to_csv
 from course_info import (
     COURSE_DISTANCES,
+    COURSE_HILL,
     COURSE_STRAIGHT_LENGTH,
+    COURSE_TURN,
     DAY_BIAS_OPTIONS,
     RUNNING_STYLES,
     VENUES,
@@ -152,25 +157,57 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
 
 
 def lookup_horse_history() -> pd.DataFrame:
-    """data/dummy_races.csv(実データ)から、各馬名の最新レース結果を取得する。
+    """data/dummy_races.csv(実データ)から、各馬名のレース結果を取得する。
 
-    horse_nameをキーにした DataFrame を返す(prev_rank, time_sec, agari_3f, corner_pos)。
+    戻り値: (latest, full)
+    - latest: horse_nameをキーにした「最新レースだけ」のDataFrame
+    - full:   horse_name列を持つ「全レース分」のDataFrame(得意不得意判定用)
     """
     if not os.path.exists(DATA_PATH):
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
     hist = pd.read_csv(DATA_PATH)
     if "horse_name" not in hist.columns:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     hist = hist.dropna(subset=["horse_name"])
     hist = hist[hist["horse_name"].astype(str).str.strip() != ""]
     if hist.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     hist = compute_pace_note(hist)  # 各レース内での展開評価(強い勝ち方/展開不利)を付与
     hist = hist.sort_values("race_id")
     latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
-    return latest
+    return latest, hist
+
+
+def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current_hill: str):
+    """ある馬の全過去成績から、今回のレース条件(右左回り・坂)との得意不得意を判定する。
+
+    予測対象のレースはまだ走っていないので、その馬の「これまでの全成績」を使って良い
+    (学習時のcompute_horse_course_aptitudeとは違い、未来のデータリークの心配は無い)。
+    """
+    if name_hist.empty or "venue" not in name_hist.columns or "finish_rank" not in name_hist.columns:
+        return APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+
+    turns = name_hist["venue"].map(COURSE_TURN).fillna("右")
+    hills = name_hist["venue"].map(COURSE_HILL).fillna("坂なし")
+    top3 = (name_hist["finish_rank"] <= 3).astype(int)
+
+    def _judge(same_mask, diff_mask, label):
+        same = top3[same_mask]
+        diff = top3[diff_mask]
+        if len(same) < 1 or len(diff) < 1:
+            return APTITUDE_UNKNOWN
+        gap = same.mean() - diff.mean()
+        if gap >= 0.34:
+            return f"得意({label}好走歴あり)"
+        if gap <= -0.34:
+            return f"不得意({label}苦手傾向)"
+        return "差なし"
+
+    turn_apt = _judge(turns == current_turn, turns != current_turn, f"{current_turn}回り")
+    hill_apt = _judge(hills == current_hill, hills != current_hill, current_hill)
+    return turn_apt, hill_apt
 
 
 def _normalize_name(name: str) -> str:
@@ -178,11 +215,15 @@ def _normalize_name(name: str) -> str:
     return str(name).strip().replace("\u3000", "").replace(" ", "")
 
 
-def apply_horse_history(df: pd.DataFrame, history: pd.DataFrame):
+def apply_horse_history(
+    df: pd.DataFrame, history: pd.DataFrame, full_history: pd.DataFrame,
+    current_turn: str, current_hill: str,
+):
     """出走馬テーブルのhorse_nameを使って前走成績(prev_rank)を自動入力する。
 
-    見つかった前走のタイム・上がり3F・通過順は、表には出さず
-    st.session_state.prev_extra に保存しておき、予測時にこっそり使う。
+    見つかった前走のタイム・上がり3F・通過順・展開評価や、今回のレース条件
+    (右左回り・坂)との得意不得意は、表には出さず st.session_state.prev_extra に
+    保存しておき、予測時にこっそり使う。
     戻り値には、見つからなかった馬名と近い候補(不一致デバッグ用)も含める。
     """
     import difflib
@@ -215,11 +256,20 @@ def apply_horse_history(df: pd.DataFrame, history: pd.DataFrame):
         if pd.notna(h.get("finish_rank")):
             df.at[i, "prev_rank"] = int(h["finish_rank"])
             matched += 1
+
+        # この馬の全過去成績から、今回のコース条件との得意不得意を判定
+        turn_apt, hill_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        if not full_history.empty and "horse_name" in full_history.columns:
+            name_hist = full_history[full_history["horse_name"] == actual_key]
+            turn_apt, hill_apt = compute_current_aptitude(name_hist, current_turn, current_hill)
+
         extra[raw_name] = {
             "prev_time_sec": h.get("time_sec", 0) if pd.notna(h.get("time_sec")) else 0,
             "prev_agari_3f": h.get("agari_3f", 0) if pd.notna(h.get("agari_3f")) else 0,
             "prev_corner_pos": h.get("corner_pos", 0) if pd.notna(h.get("corner_pos")) else 0,
             "prev_pace_note": h.get("pace_note", PACE_NOTE_NONE) if pd.notna(h.get("pace_note")) else PACE_NOTE_NONE,
+            "horse_turn_aptitude": turn_apt,
+            "horse_hill_aptitude": hill_apt,
         }
     return df, matched, extra, unmatched_suggestions
 
@@ -423,12 +473,17 @@ def main():
         condition = st.selectbox("馬場状態", ["良", "稍重", "重", "不良"])
 
     straight_length = COURSE_STRAIGHT_LENGTH[venue]
+    turn_direction = COURSE_TURN[venue]
+    hill = COURSE_HILL[venue]
     day_bias = st.selectbox(
         "今日の馬場傾向",
         DAY_BIAS_OPTIONS,
         help="レース当日の実況・データを見て、内外や脚質の有利不利があれば選んでください。分からなければ「フラット」でOKです。",
     )
-    st.caption(f"📏 {venue}の直線の長さ: {straight_length}(固定情報として自動反映されます)")
+    st.caption(
+        f"📏 {venue}: 直線{straight_length} / {turn_direction}回り / {hill}"
+        "(固定情報として自動反映されます)"
+    )
 
     section_head("2", "出走馬の情報")
 
@@ -499,20 +554,30 @@ def main():
     )
 
     if st.button("🔎 馬名から前走成績を自動入力"):
-        history = lookup_horse_history()
+        history, full_history = lookup_horse_history()
         if history.empty:
             st.session_state.autofill_msg = ("warning", "過去データが見つかりませんでした(まだ馬名付きのデータが少ない可能性があります)。")
             st.session_state.autofill_notes = {}
             st.session_state.autofill_suggestions = {}
         else:
-            updated, matched, extra, suggestions = apply_horse_history(edited, history)
+            updated, matched, extra, suggestions = apply_horse_history(
+                edited, history, full_history, turn_direction, hill
+            )
             st.session_state.horse_df = updated
             st.session_state.horse_table_version += 1
             st.session_state.prev_extra = extra
-            st.session_state.autofill_notes = {
-                n: e["prev_pace_note"] for n, e in extra.items()
-                if e.get("prev_pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE
-            }
+            notes = {}
+            for n, e in extra.items():
+                parts = []
+                if e.get("prev_pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE:
+                    parts.append(f"前走展開: {e['prev_pace_note']}")
+                if e.get("horse_turn_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
+                    parts.append(f"回り適性: {e['horse_turn_aptitude']}")
+                if e.get("horse_hill_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
+                    parts.append(f"坂適性: {e['horse_hill_aptitude']}")
+                if parts:
+                    notes[n] = " / ".join(parts)
+            st.session_state.autofill_notes = notes
             st.session_state.autofill_suggestions = suggestions
             if matched:
                 st.session_state.autofill_msg = ("success", f"{matched}頭分、前走成績を反映しました(表の「前走着順」を確認してください)。")
@@ -541,12 +606,16 @@ def main():
         df["condition"] = condition
         df["day_bias"] = day_bias
         df["straight_length"] = straight_length
+        df["turn_direction"] = turn_direction
+        df["hill"] = hill
 
         # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順・展開評価)をマージ
         prev_extra = st.session_state.get("prev_extra", {})
         for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
             df[col] = 0.0
         df["prev_pace_note"] = PACE_NOTE_NONE
+        df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
+        df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
         if prev_extra and "horse_name" in df.columns:
             for i, row in df.iterrows():
                 name = str(row.get("horse_name", "")).strip()
