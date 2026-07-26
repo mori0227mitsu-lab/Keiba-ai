@@ -18,7 +18,7 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-from model.train_model import FEATURE_COLS, build_features
+from model.train_model import FEATURE_COLS, build_features, compute_pace_note, PACE_NOTE_NONE
 from data_collector import parse_netkeiba_result
 from github_sync import append_rows_to_csv
 from course_info import (
@@ -167,6 +167,7 @@ def lookup_horse_history() -> pd.DataFrame:
     if hist.empty:
         return pd.DataFrame()
 
+    hist = compute_pace_note(hist)  # 各レース内での展開評価(強い勝ち方/展開不利)を付与
     hist = hist.sort_values("race_id")
     latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
     return latest
@@ -195,6 +196,7 @@ def apply_horse_history(df: pd.DataFrame, history: pd.DataFrame):
             "prev_time_sec": h.get("time_sec", 0) if pd.notna(h.get("time_sec")) else 0,
             "prev_agari_3f": h.get("agari_3f", 0) if pd.notna(h.get("agari_3f")) else 0,
             "prev_corner_pos": h.get("corner_pos", 0) if pd.notna(h.get("corner_pos")) else 0,
+            "prev_pace_note": h.get("pace_note", PACE_NOTE_NONE) if pd.notna(h.get("pace_note")) else PACE_NOTE_NONE,
         }
     return df, matched, extra
 
@@ -414,6 +416,9 @@ def main():
             st.session_state.prev_extra = extra
             if matched:
                 st.success(f"{matched}頭分、前走成績を反映しました(表の「前走着順」を確認してください)。")
+                notes = {n: e["prev_pace_note"] for n, e in extra.items() if e.get("prev_pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE}
+                for name, note in notes.items():
+                    st.caption(f"📝 {name}: 前走の展開評価 → {note}")
             else:
                 st.info("表の馬名と一致する過去データが見つかりませんでした。馬名の表記が過去データと合っているか確認してください。")
 
@@ -430,10 +435,11 @@ def main():
         df["day_bias"] = day_bias
         df["straight_length"] = straight_length
 
-        # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順)をマージ
+        # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順・展開評価)をマージ
         prev_extra = st.session_state.get("prev_extra", {})
         for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
             df[col] = 0.0
+        df["prev_pace_note"] = PACE_NOTE_NONE
         if prev_extra and "horse_name" in df.columns:
             for i, row in df.iterrows():
                 name = str(row.get("horse_name", "")).strip()
