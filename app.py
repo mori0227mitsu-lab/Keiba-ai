@@ -23,7 +23,7 @@ from model.train_model import (
     PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest, add_chronological_sort_key,
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi
-from github_sync import append_rows_to_csv, get_next_race_id
+from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
 from course_info import (
     COURSE_DISTANCES,
     COURSE_HILL,
@@ -456,27 +456,47 @@ def main():
 
         if st.button("プレビュー"):
             try:
+                token = st.secrets["github_token"]
+                repo = st.secrets["github_repo"]
+                branch = st.secrets.get("github_branch", "main")
+                existing_df, _ = fetch_csv(token, repo, branch, "data/dummy_races.csv")
+
                 if use_auto_id:
-                    token = st.secrets["github_token"]
-                    repo = st.secrets["github_repo"]
-                    branch = st.secrets.get("github_branch", "main")
-                    start_id = get_next_race_id(token, repo, branch, "data/dummy_races.csv")
+                    start_id = (int(existing_df["race_id"].max()) + 1) if len(existing_df) else 9001
                 else:
                     start_id = int(manual_start_id)
 
                 preview_df = parse_netkeiba_results_multi(
                     collect_text, start_race_id=start_id, race_date=str(collect_date),
                 )
+
+                # 既存データと(開催場・距離・コース種別・開催日)が同じレースが
+                # あれば、新しいrace_idではなく既存のrace_idを使う(=上書きになる)
+                races_info = []
+                for rid in sorted(preview_df["race_id"].unique()):
+                    row = preview_df[preview_df["race_id"] == rid].iloc[0]
+                    races_info.append({
+                        "venue": row["venue"], "distance": row["distance"],
+                        "track_type": row["track_type"], "race_date": row.get("race_date"),
+                    })
+                matches = find_existing_race_ids(existing_df, races_info)
+
+                overwritten = []
+                for i, rid in enumerate(sorted(preview_df["race_id"].unique())):
+                    if i in matches:
+                        preview_df.loc[preview_df["race_id"] == rid, "race_id"] = matches[i]
+                        overwritten.append(matches[i])
+
                 st.session_state.collect_preview = preview_df
                 n_races = preview_df["race_id"].nunique()
-                st.success(
-                    f"{n_races}レース・{len(preview_df)}頭分を解析しました"
-                    f"(race_id {start_id}〜{start_id + n_races - 1})。内容を確認してから保存してください。"
-                )
+                msg = f"{n_races}レース・{len(preview_df)}頭分を解析しました。"
+                if overwritten:
+                    msg += f" うち{len(overwritten)}レースは既存データと同じ内容のため、上書き対象になります(race_id: {overwritten})。"
+                st.success(msg + " 内容を確認してから保存してください。")
             except KeyError:
                 st.error(
-                    "GitHubのトークンが設定されていないため、race_idを自動で決められません。"
-                    "「race_idを自動で決める」のチェックを外して、開始race_idを手入力してください。"
+                    "GitHubのトークンが設定されていないため、重複チェックができません。"
+                    "Streamlit CloudのSecretsにgithub_token / github_repoを設定してください。"
                 )
             except Exception as e:
                 st.error(str(e))
