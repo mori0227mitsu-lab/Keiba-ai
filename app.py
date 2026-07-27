@@ -22,6 +22,7 @@ from model.train_model import (
     FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
     PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest, add_chronological_sort_key,
     FIELD_NOTE_NONE, compute_race_time_level, compute_field_strength_note,
+    STRETCH_OUT_NOTE_NONE, compute_stretch_out_note,
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
@@ -179,6 +180,7 @@ def lookup_horse_history() -> pd.DataFrame:
     hist = compute_pace_note(hist)  # 各レース内での展開評価(強い勝ち方/展開不利)を付与
     hist = compute_race_time_level(hist)  # レースタイムの水準を付与
     hist = compute_field_strength_note(hist)  # 先着馬のその後の評価を付与
+    hist = compute_stretch_out_note(hist)  # 距離延長で変わるかもの判定を付与
     hist = add_chronological_sort_key(hist)
     hist = hist.sort_values("_chron_key")
     latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
@@ -276,6 +278,7 @@ def apply_horse_history(
             "prev_class_level": h.get("class_level", 0) if pd.notna(h.get("class_level")) else 0,
             "prev_race_time_score": h.get("race_time_score", 0) if pd.notna(h.get("race_time_score")) else 0,
             "prev_field_strength_note": h.get("field_strength_note", FIELD_NOTE_NONE) if pd.notna(h.get("field_strength_note")) else FIELD_NOTE_NONE,
+            "prev_stretch_out_note": h.get("stretch_out_note", STRETCH_OUT_NOTE_NONE) if pd.notna(h.get("stretch_out_note")) else STRETCH_OUT_NOTE_NONE,
             "horse_turn_aptitude": turn_apt,
             "horse_hill_aptitude": hill_apt,
         }
@@ -740,6 +743,8 @@ def main():
                 parts = []
                 if e.get("prev_pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE:
                     parts.append(f"前走展開: {e['prev_pace_note']}")
+                if e.get("prev_stretch_out_note", STRETCH_OUT_NOTE_NONE) != STRETCH_OUT_NOTE_NONE:
+                    parts.append(f"注目: {e['prev_stretch_out_note']}")
                 if e.get("horse_turn_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
                     parts.append(f"回り適性: {e['horse_turn_aptitude']}")
                 if e.get("horse_hill_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
@@ -792,6 +797,7 @@ def main():
             df[col] = 0.0
         df["prev_pace_note"] = PACE_NOTE_NONE
         df["prev_field_strength_note"] = FIELD_NOTE_NONE
+        df["prev_stretch_out_note"] = STRETCH_OUT_NOTE_NONE
         df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
         df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
         if prev_extra and "horse_name" in df.columns:
