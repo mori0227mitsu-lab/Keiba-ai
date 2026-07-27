@@ -28,6 +28,7 @@ CATEGORICAL_COLS = [
     "day_bias", "straight_length", "trainer", "prev_pace_note",
     "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
     "race_class", "prev_field_strength_note", "prev_stretch_out_note",
+    "horse_distance_aptitude",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる/固定知識)
@@ -40,8 +41,8 @@ FEATURE_COLS = [
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
     "prev_pace_note", "prev_class_level", "prev_race_time_score", "prev_field_strength_note",
     "prev_stretch_out_note",
-    # 馬ごとの右左回り・坂の得意不得意(過去の全成績から判定)
-    "horse_turn_aptitude", "horse_hill_aptitude",
+    # 馬ごとの右左回り・坂・距離の得意不得意(過去の全成績から判定)
+    "horse_turn_aptitude", "horse_hill_aptitude", "horse_distance_aptitude",
 ]
 TARGET_COL = "is_top3"
 
@@ -184,6 +185,7 @@ def add_chronological_sort_key(df: pd.DataFrame) -> pd.DataFrame:
         parsed = pd.Series(pd.NaT, index=df.index)
     has_date = parsed.notna()
     df["_chron_key"] = list(zip(has_date, parsed.fillna(pd.Timestamp.min), df["race_id"]))
+    df["_parsed_date"] = parsed
     return df
 
 
@@ -251,6 +253,66 @@ def compute_horse_course_aptitude(df: pd.DataFrame) -> pd.DataFrame:
 
     df["horse_turn_aptitude"] = turn_apt
     df["horse_hill_aptitude"] = hill_apt
+    return df
+
+
+def distance_category(distance) -> str:
+    """距離を「短距離/マイル/中距離/長距離」の4区分に分類する。"""
+    try:
+        d = float(distance)
+    except (TypeError, ValueError):
+        return "不明"
+    if d <= 1400:
+        return "短距離"
+    if d <= 1800:
+        return "マイル"
+    if d <= 2400:
+        return "中距離"
+    return "長距離"
+
+
+def compute_horse_distance_aptitude(df: pd.DataFrame) -> pd.DataFrame:
+    """馬ごとに、距離区分(短距離/マイル/中距離/長距離)ごとの複勝率を比較し、
+    得意不得意を判定する(horse_distance_aptitude)。
+
+    判定には「そのレースより前の成績だけ」を使う(データリーク防止)。
+    """
+    df = df.copy()
+    if not {"horse_name", "distance", "finish_rank", "race_id"}.issubset(df.columns):
+        df["horse_distance_aptitude"] = APTITUDE_UNKNOWN
+        return df
+
+    df["_dist_cat"] = df["distance"].apply(distance_category)
+
+    df = add_chronological_sort_key(df)
+    df = df.sort_values("_chron_key").reset_index(drop=True)
+    is_top3 = (df["finish_rank"] <= 3).astype(int)
+
+    dist_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
+
+    for _, g in df.groupby("horse_name", sort=False):
+        idx = g.index.tolist()
+        for pos, i in enumerate(idx):
+            past_idx = idx[:pos]
+            if len(past_idx) < 2:
+                continue
+
+            cur_cat = df.at[i, "_dist_cat"]
+            past_cat = df.loc[past_idx, "_dist_cat"]
+            past_top3 = is_top3.loc[past_idx]
+
+            same_cat = past_top3[past_cat == cur_cat]
+            diff_cat = past_top3[past_cat != cur_cat]
+            if len(same_cat) >= 1 and len(diff_cat) >= 1:
+                gap = same_cat.mean() - diff_cat.mean()
+                if gap >= APTITUDE_DIFF_THRESHOLD:
+                    dist_apt.at[i] = f"得意({cur_cat}好走歴あり)"
+                elif gap <= -APTITUDE_DIFF_THRESHOLD:
+                    dist_apt.at[i] = f"不得意({cur_cat}苦手傾向)"
+                else:
+                    dist_apt.at[i] = "差なし"
+
+    df["horse_distance_aptitude"] = dist_apt
     return df
 
 
@@ -404,6 +466,14 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
         shifted_pace = grouped["pace_note"].shift(1)
         df["prev_pace_note"] = shifted_pace.fillna(PACE_NOTE_NONE)
 
+    # 前走からの間隔(週数)を、開催日の差から自動計算する
+    # (両方の日付が分かる場合だけ計算し、片方でも不明なら0=不明のまま)
+    if "_parsed_date" in df.columns:
+        prev_date = grouped["_parsed_date"].shift(1)
+        both_known = df["_parsed_date"].notna() & prev_date.notna()
+        weeks = ((df["_parsed_date"] - prev_date).dt.days / 7).round().astype("Int64")
+        df.loc[both_known, "rest_weeks"] = weeks[both_known].astype(int).clip(lower=0)
+
     if "field_strength_note" in df.columns:
         shifted_field = grouped["field_strength_note"].shift(1)
         df["prev_field_strength_note"] = shifted_field.fillna(FIELD_NOTE_NONE)
@@ -419,6 +489,7 @@ def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = fill_prev_from_history(df)
     df = compute_horse_course_aptitude(df)
+    df = compute_horse_distance_aptitude(df)
     df[TARGET_COL] = (df["finish_rank"] <= 3).astype(int)
     return df
 
@@ -453,6 +524,8 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
     if "horse_hill_aptitude" not in df.columns:
         df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
+    if "horse_distance_aptitude" not in df.columns:
+        df["horse_distance_aptitude"] = APTITUDE_UNKNOWN
 
     fitted = encoders is None
     if encoders is None:
