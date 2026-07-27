@@ -534,12 +534,16 @@ def _assign_marks_for_n(n: int) -> list:
     return marks + [""] * (n - len(marks))
 
 
-def backtest(data_path: str, n_splits: int = 5, random_state: int = 42) -> dict:
+def backtest(data_path: str, n_splits: int = 5, random_state: int = 42, age_filter: str = "全馬") -> dict:
     """「そのレースを学習に使わずに予測する」形で、印ごとの的中率を検証する。
 
     race_id単位でグループ分割(GroupKFold)し、あるレースの結果は
     そのレースを含まないモデルで予測することで、答えを知った上で
     予測するズル(データリーク)が起きないようにしている。
+
+    age_filterで「2歳馬のみ」「3歳以上のみ」に絞って集計することもできる
+    (他の馬齢のデータを混ぜても、対象馬齢の精度が落ちていないか確認するため)。
+    学習自体は常に全データを使い、集計時の絞り込みだけ行う。
 
     戻り値には、印ごとの複勝率・勝率と、「1番人気を毎回買った場合」との
     比較、レース数・対象頭数などを含む。
@@ -561,7 +565,7 @@ def backtest(data_path: str, n_splits: int = 5, random_state: int = 42) -> dict:
         model.fit(X.iloc[train_idx], y[train_idx])
         oof_proba[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
 
-    result = df[["race_id", "horse_num", "finish_rank", "popularity"]].copy()
+    result = df[["race_id", "horse_num", "finish_rank", "popularity", "age"]].copy()
     result["ai_proba"] = oof_proba
 
     rows = []
@@ -570,6 +574,12 @@ def backtest(data_path: str, n_splits: int = 5, random_state: int = 42) -> dict:
         g["mark"] = _assign_marks_for_n(len(g))
         rows.append(g)
     marked = pd.concat(rows, ignore_index=True)
+
+    # 年齢で絞り込む(学習は全データのまま、集計対象だけ絞る)
+    if age_filter == "2歳馬のみ":
+        marked = marked[marked["age"] == 2]
+    elif age_filter == "3歳以上のみ":
+        marked = marked[marked["age"] >= 3]
 
     def _rate(sub, cond_col, cond_val):
         top3 = (sub["finish_rank"] <= 3).mean()
@@ -586,7 +596,7 @@ def backtest(data_path: str, n_splits: int = 5, random_state: int = 42) -> dict:
     favorite_stats = _rate(favorite, None, None) if len(favorite) else None
 
     return {
-        "n_races": unique_races,
+        "n_races": marked["race_id"].nunique(),
         "n_horses": len(marked),
         "mark_stats": mark_stats,
         "favorite_stats": favorite_stats,
