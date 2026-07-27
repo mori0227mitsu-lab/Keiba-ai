@@ -477,6 +477,14 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         df[col] = df[col].apply(safe_transform)
 
     X = df[FEATURE_COLS]
+    # 想定外の欠損値(NaN)が残っていると学習時にエラーになるため、最後に必ず0で埋める
+    # (原因不明のデータ不備があっても、アプリが完全に落ちてしまうのを防ぐための安全策)
+    nan_cols = X.columns[X.isna().any()].tolist()
+    if nan_cols:
+        import sys
+        print(f"[警告] 特徴量にNaNが見つかったため0で埋めました: {nan_cols}", file=sys.stderr)
+    X = X.fillna(0)
+
     return X, encoders
 
 
