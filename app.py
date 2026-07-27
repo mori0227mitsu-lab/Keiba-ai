@@ -939,43 +939,82 @@ def main():
             st.markdown("---")
             section_head("4", "買い目の期待値を計算する")
             st.caption(
-                "上位3頭(◎○▲)を軸に、実際のオッズを入力すると期待値(確率×オッズ)を計算します。"
-                "単勝オッズはデータにありますが、それ以外の馬券種はオッズが分からないため、"
-                "購入前にオッズ表アプリなどで確認して入力してください。期待値が1.0を超えるほど、"
-                "理論上「買う価値がある」とされる目安になります。"
+                "印がついた馬の中から、軸・相手を自由に選んで組み合わせを作れます。"
+                "実際のオッズを入力すると期待値(確率×オッズ)を計算します。単勝オッズはデータに"
+                "ありますが、それ以外の馬券種はオッズが分からないため、購入前にオッズ表アプリなどで"
+                "確認して入力してください。期待値が1.0を超えるほど、理論上「買う価値がある」目安になります。"
             )
 
-            names = {i: f"{row['印']}{row['馬番']}番" for i, row in top3_picks.reset_index(drop=True).iterrows()}
-            win_p = (top3_picks["勝率(%)"] / 100).tolist()
-            others_win_p = ((result["勝率(%)"].sum() - top3_picks["勝率(%)"].sum()) / 100)
-            n_others = max(len(result) - len(top3_picks), 1)
-            others_list = [others_win_p / n_others] * n_others  # 残り馬の勝率を均等割りで近似
+            # 印がついた全馬(◎○▲△△)を選択肢にする
+            marked = result[result["印"] != ""].reset_index(drop=True)
+            option_labels = [f"{row['印']}{row['馬番']}番 {row.get('馬名', '')}".strip() for _, row in marked.iterrows()]
+            win_p_by_label = {
+                label: marked.iloc[i]["勝率(%)"] / 100 for i, label in enumerate(option_labels)
+            }
+            odds_by_label = {
+                label: float(marked.iloc[i].get("オッズ", 0) or 0) for i, label in enumerate(option_labels)
+            }
+            # 印がついていない残り馬の勝率(ワイドの計算に必要)
+            unmarked = result[result["印"] == ""]
+            others_list = (unmarked["勝率(%)"] / 100).tolist() if len(unmarked) else [0.0]
 
-            bets_input = []
-            st.markdown(f"**単勝 {names[0]}**(自動計算)")
-            tansho_odds = float(top3_picks.iloc[0]["オッズ"]) if "オッズ" in top3_picks.columns else 0.0
-            bets_input.append({
-                "種類": "単勝", "対象": names[0],
-                "確率": win_p[0], "オッズ": tansho_odds,
-            })
+            st.markdown("**単勝**")
+            tansho_choice = st.selectbox("単勝で買う馬", option_labels, key="tansho_choice")
+            bets_input = [{
+                "種類": "単勝", "対象": tansho_choice,
+                "確率": win_p_by_label[tansho_choice], "オッズ": odds_by_label[tansho_choice],
+            }]
 
-            if len(top3_picks) >= 2:
+            if len(option_labels) >= 2:
+                st.markdown("**馬連・ワイド**(2頭選択)")
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    umaren_odds = st.number_input(f"馬連 {names[0]}-{names[1]} のオッズ", min_value=0.0, step=0.1, key="umaren01")
+                    umaren_pair = st.multiselect(
+                        "組み合わせる2頭", option_labels, default=option_labels[:2],
+                        max_selections=2, key="umaren_pair",
+                    )
                 with col_b:
-                    wide_odds = st.number_input(f"ワイド {names[0]}-{names[1]} のオッズ", min_value=0.0, step=0.1, key="wide01")
-                bets_input.append({"種類": "馬連", "対象": f"{names[0]}-{names[1]}", "確率": quinella_proba(win_p[0], win_p[1]), "オッズ": umaren_odds})
-                bets_input.append({"種類": "ワイド", "対象": f"{names[0]}-{names[1]}", "確率": wide_proba(win_p[0], win_p[1], others_list), "オッズ": wide_odds})
+                    umaren_odds = st.number_input("馬連オッズ", min_value=0.0, step=0.1, key="umaren_odds_v2")
+                    wide_odds = st.number_input("ワイドオッズ", min_value=0.0, step=0.1, key="wide_odds_v2")
+                if len(umaren_pair) == 2:
+                    pa, pb = win_p_by_label[umaren_pair[0]], win_p_by_label[umaren_pair[1]]
+                    label_pair = f"{umaren_pair[0]}-{umaren_pair[1]}"
+                    bets_input.append({"種類": "馬連", "対象": label_pair, "確率": quinella_proba(pa, pb), "オッズ": umaren_odds})
+                    bets_input.append({"種類": "ワイド", "対象": label_pair, "確率": wide_proba(pa, pb, others_list), "オッズ": wide_odds})
+                else:
+                    st.caption("馬連・ワイドは、ちょうど2頭選んでください。")
 
-            if len(top3_picks) >= 3:
-                col_c, col_d = st.columns(2)
-                with col_c:
-                    sanrenpuku_odds = st.number_input(f"三連複 {names[0]}-{names[1]}-{names[2]} のオッズ", min_value=0.0, step=0.1, key="sanrenpuku012")
-                with col_d:
-                    santan_odds = st.number_input(f"三連単 {names[0]}→{names[1]}→{names[2]} のオッズ", min_value=0.0, step=0.1, key="santan012")
-                bets_input.append({"種類": "三連複", "対象": f"{names[0]}-{names[1]}-{names[2]}", "確率": trio_proba(win_p[0], win_p[1], win_p[2]), "オッズ": sanrenpuku_odds})
-                bets_input.append({"種類": "三連単", "対象": f"{names[0]}→{names[1]}→{names[2]}", "確率": trifecta_proba(win_p[0], win_p[1], win_p[2]), "オッズ": santan_odds})
+            if len(option_labels) >= 3:
+                st.markdown("**三連複**(3頭選択)")
+                sanrenpuku_trio = st.multiselect(
+                    "組み合わせる3頭", option_labels, default=option_labels[:3],
+                    max_selections=3, key="sanrenpuku_trio",
+                )
+                sanrenpuku_odds = st.number_input("三連複オッズ", min_value=0.0, step=0.1, key="sanrenpuku_odds_v2")
+                if len(sanrenpuku_trio) == 3:
+                    pa, pb, pc = (win_p_by_label[n] for n in sanrenpuku_trio)
+                    label_trio = "-".join(sanrenpuku_trio)
+                    bets_input.append({"種類": "三連複", "対象": label_trio, "確率": trio_proba(pa, pb, pc), "オッズ": sanrenpuku_odds})
+                else:
+                    st.caption("三連複は、ちょうど3頭選んでください。")
+
+                st.markdown("**三連単**(着順を指定)")
+                col_1, col_2, col_3 = st.columns(3)
+                with col_1:
+                    santan_1st = st.selectbox("1着", option_labels, key="santan_1st")
+                with col_2:
+                    santan_2nd = st.selectbox("2着", option_labels, index=min(1, len(option_labels) - 1), key="santan_2nd")
+                with col_3:
+                    santan_3rd = st.selectbox("3着", option_labels, index=min(2, len(option_labels) - 1), key="santan_3rd")
+                santan_odds = st.number_input("三連単オッズ", min_value=0.0, step=0.1, key="santan_odds_v2")
+                if len({santan_1st, santan_2nd, santan_3rd}) == 3:
+                    p1, p2, p3 = win_p_by_label[santan_1st], win_p_by_label[santan_2nd], win_p_by_label[santan_3rd]
+                    bets_input.append({
+                        "種類": "三連単", "対象": f"{santan_1st}→{santan_2nd}→{santan_3rd}",
+                        "確率": trifecta_proba(p1, p2, p3), "オッズ": santan_odds,
+                    })
+                else:
+                    st.caption("三連単は、1着・2着・3着に異なる馬を選んでください。")
 
             ev_result = compute_expected_values(bets_input)
             ev_df = pd.DataFrame(ev_result)
