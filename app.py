@@ -23,6 +23,7 @@ from model.train_model import (
     PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest, add_chronological_sort_key,
     FIELD_NOTE_NONE, compute_race_time_level, compute_field_strength_note,
     STRETCH_OUT_NOTE_NONE, compute_stretch_out_note,
+    quinella_proba, wide_proba, trio_proba, trifecta_proba, compute_expected_values,
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
@@ -888,9 +889,16 @@ def main():
         X, _ = build_features(df, encoders=bundle["encoders"])
         proba = bundle["model"].predict_proba(X)[:, 1]
 
+        # 勝率(1着になる確率)も計算し、レース全体で合計1になるよう正規化する
+        # (単勝オッズが無い馬券種の期待値計算に使う)
+        win_proba_raw = bundle["win_model"].predict_proba(X)[:, 1]
+        win_proba_sum = win_proba_raw.sum()
+        win_proba = win_proba_raw / win_proba_sum if win_proba_sum > 0 else win_proba_raw
+
         display_cols = ["horse_num", "horse_name", "waku", "jockey", "popularity", "odds"]
         result = edited[[c for c in display_cols if c in edited.columns]].copy()
         result["複勝確率(%)"] = (proba * 100).round(1)
+        result["勝率(%)"] = (win_proba * 100).round(1)
 
         # AIの評価が高い順に並べ、上位に印をつける
         result = result.sort_values("複勝確率(%)", ascending=False).reset_index(drop=True)
@@ -925,6 +933,59 @@ def main():
             "「人気とのズレ」がプラスの馬は、AIが市場(人気)より高く評価している= 妙味のある穴馬候補です。"
             "マイナスの馬は人気先行の可能性があります。"
         )
+
+        top3_picks = result.iloc[:3] if len(result) >= 3 else result
+        if len(top3_picks) >= 2:
+            st.markdown("---")
+            section_head("4", "買い目の期待値を計算する")
+            st.caption(
+                "上位3頭(◎○▲)を軸に、実際のオッズを入力すると期待値(確率×オッズ)を計算します。"
+                "単勝オッズはデータにありますが、それ以外の馬券種はオッズが分からないため、"
+                "購入前にオッズ表アプリなどで確認して入力してください。期待値が1.0を超えるほど、"
+                "理論上「買う価値がある」とされる目安になります。"
+            )
+
+            names = {i: f"{row['印']}{row['馬番']}番" for i, row in top3_picks.reset_index(drop=True).iterrows()}
+            win_p = (top3_picks["勝率(%)"] / 100).tolist()
+            others_win_p = ((result["勝率(%)"].sum() - top3_picks["勝率(%)"].sum()) / 100)
+            n_others = max(len(result) - len(top3_picks), 1)
+            others_list = [others_win_p / n_others] * n_others  # 残り馬の勝率を均等割りで近似
+
+            bets_input = []
+            st.markdown(f"**単勝 {names[0]}**(自動計算)")
+            tansho_odds = float(top3_picks.iloc[0]["オッズ"]) if "オッズ" in top3_picks.columns else 0.0
+            bets_input.append({
+                "種類": "単勝", "対象": names[0],
+                "確率": win_p[0], "オッズ": tansho_odds,
+            })
+
+            if len(top3_picks) >= 2:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    umaren_odds = st.number_input(f"馬連 {names[0]}-{names[1]} のオッズ", min_value=0.0, step=0.1, key="umaren01")
+                with col_b:
+                    wide_odds = st.number_input(f"ワイド {names[0]}-{names[1]} のオッズ", min_value=0.0, step=0.1, key="wide01")
+                bets_input.append({"種類": "馬連", "対象": f"{names[0]}-{names[1]}", "確率": quinella_proba(win_p[0], win_p[1]), "オッズ": umaren_odds})
+                bets_input.append({"種類": "ワイド", "対象": f"{names[0]}-{names[1]}", "確率": wide_proba(win_p[0], win_p[1], others_list), "オッズ": wide_odds})
+
+            if len(top3_picks) >= 3:
+                col_c, col_d = st.columns(2)
+                with col_c:
+                    sanrenpuku_odds = st.number_input(f"三連複 {names[0]}-{names[1]}-{names[2]} のオッズ", min_value=0.0, step=0.1, key="sanrenpuku012")
+                with col_d:
+                    santan_odds = st.number_input(f"三連単 {names[0]}→{names[1]}→{names[2]} のオッズ", min_value=0.0, step=0.1, key="santan012")
+                bets_input.append({"種類": "三連複", "対象": f"{names[0]}-{names[1]}-{names[2]}", "確率": trio_proba(win_p[0], win_p[1], win_p[2]), "オッズ": sanrenpuku_odds})
+                bets_input.append({"種類": "三連単", "対象": f"{names[0]}→{names[1]}→{names[2]}", "確率": trifecta_proba(win_p[0], win_p[1], win_p[2]), "オッズ": santan_odds})
+
+            ev_result = compute_expected_values(bets_input)
+            ev_df = pd.DataFrame(ev_result)
+            ev_df["確率(%)"] = (ev_df["確率"] * 100).round(2)
+            ev_df = ev_df[["種類", "対象", "確率(%)", "オッズ", "期待値"]]
+            st.dataframe(ev_df, use_container_width=True, hide_index=True)
+            st.caption(
+                "確率はAIの推定(ハーヴィルの公式による近似)なので、あくまで目安です。"
+                "オッズを入力していない馬券種は期待値が空欄のままになります。"
+            )
 
         st.markdown(
             '<div class="disclaimer">⚠️ 本ツールは娯楽・分析目的の予測ツールです。'
