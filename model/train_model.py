@@ -101,13 +101,20 @@ def compute_race_time_level(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
-    """「このレースで自分より先着した馬が、後の別のレースで3着以内に入っているか」
-    を判定する(field_strength_note)。
+FIELD_STRENGTH_MIN_RIVALS = 2   # 何頭以上が後に掲示板好走していれば「高評価」にするか
+FIELD_STRENGTH_TIME_GAP = 1.0   # この秒数以内の僅差だった先着馬だけをカウント対象にする
+FIELD_STRENGTH_BOARD_RANK = 5   # 「掲示板」とみなす着順(1〜5着)
 
-    先着した相手が後に活躍していれば、今回負けていても「レベルの高い相手に
-    負けていただけ」と評価できる材料になる。判定には、そのレースより後に
-    行われた(chronologicalに後の)レースの結果だけを使う。
+
+def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
+    """「このレースで自分に僅差で先着した馬が、複数頭その後の別レースで
+    掲示板(5着以内)に載っているか」を判定する(field_strength_note)。
+
+    先着1頭だけの好走では「たまたま」の可能性があるため、
+    - タイム差が僅差(FIELD_STRENGTH_TIME_GAP秒以内)だった先着馬のうち、
+    - FIELD_STRENGTH_MIN_RIVALS頭以上が後日、掲示板(5着以内)に載っていれば
+    「高評価」と判定する。判定には、そのレースより後に行われた
+    (chronologicalに後の)レースの結果だけを使う。
     """
     df = df.copy()
     required = {"horse_name", "race_id", "finish_rank"}
@@ -124,6 +131,7 @@ def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
         name: g[["_chron_key", "finish_rank"]].values
         for name, g in df.groupby("horse_name")
     }
+    has_time = "time_sec" in df.columns
 
     for race_id, g in df.groupby("race_id"):
         g_sorted = g.sort_values("finish_rank")
@@ -131,19 +139,27 @@ def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
             ahead = g_sorted[g_sorted["finish_rank"] < row["finish_rank"]]
             if ahead.empty:
                 continue
-            beaten_by_future_winner = False
-            for ahead_name in ahead["horse_name"]:
-                hist = history_by_name.get(ahead_name)
+
+            my_time = row.get("time_sec") if has_time else None
+            strong_count = 0
+            for _, arow in ahead.iterrows():
+                # タイム差が大きすぎる(僅差ではない)先着馬はカウントしない
+                if has_time and pd.notna(my_time) and pd.notna(arow.get("time_sec")):
+                    gap = abs(my_time - arow["time_sec"])
+                    if gap > FIELD_STRENGTH_TIME_GAP:
+                        continue
+
+                hist = history_by_name.get(arow["horse_name"])
                 if hist is None:
                     continue
-                future_top3 = any(
-                    (chron > row["_chron_key"]) and (rank <= 3)
+                future_board = any(
+                    (chron > row["_chron_key"]) and (rank <= FIELD_STRENGTH_BOARD_RANK)
                     for chron, rank in hist
                 )
-                if future_top3:
-                    beaten_by_future_winner = True
-                    break
-            if beaten_by_future_winner:
+                if future_board:
+                    strong_count += 1
+
+            if strong_count >= FIELD_STRENGTH_MIN_RIVALS:
                 note.at[idx] = FIELD_NOTE_STRONG
 
     df["field_strength_note"] = note
