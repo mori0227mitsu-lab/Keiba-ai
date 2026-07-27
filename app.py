@@ -26,7 +26,7 @@ from model.train_model import (
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
-from race_class import RACE_CLASS_PATTERNS
+from race_class import RACE_CLASS_PATTERNS, describe_race_level
 from course_info import (
     COURSE_DISTANCES,
     COURSE_HILL,
@@ -157,6 +157,35 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
 
     df = df[HORSE_TABLE_COLS]
     return df.reset_index(drop=True)
+
+
+def get_horse_full_history(horse_name_query: str) -> pd.DataFrame:
+    """指定した馬名(部分一致)の全レース成績を、時系列順に取得する。
+
+    展開評価・レースタイム水準・相手のレベル評価・レースレベルもまとめて計算して返す。
+    """
+    if not os.path.exists(DATA_PATH):
+        return pd.DataFrame()
+    hist = pd.read_csv(DATA_PATH)
+    if "horse_name" not in hist.columns:
+        return pd.DataFrame()
+
+    hist = hist.dropna(subset=["horse_name"])
+    hist = hist[hist["horse_name"].astype(str).str.strip() != ""]
+    if hist.empty:
+        return pd.DataFrame()
+
+    hist = compute_pace_note(hist)
+    hist = compute_race_time_level(hist)
+    hist = compute_field_strength_note(hist)
+    hist = compute_stretch_out_note(hist)
+    hist = add_chronological_sort_key(hist)
+    hist = hist.sort_values("_chron_key")
+
+    query_norm = _normalize_name(horse_name_query)
+    name_norm = hist["horse_name"].astype(str).apply(_normalize_name)
+    matched = hist[name_norm.str.contains(query_norm, na=False)]
+    return matched
 
 
 def lookup_horse_history() -> pd.DataFrame:
@@ -607,6 +636,48 @@ def main():
                 "◎の成績がこれを上回っていれば、AIの予測が市場の評価に対して"
                 "何らかの上乗せ価値を出せている、という目安になります。"
             )
+
+    with st.expander("🔎 馬名でデータを検索する(データ蓄積の確認・振り返り用)"):
+        st.caption(
+            "馬名を入力すると、その馬の全レース成績と、うちのAIが見ている中身"
+            "(展開評価・レースレベル・相手の強さ・距離延長候補かどうか)を確認できます。"
+        )
+        search_name = st.text_input("馬名(部分一致でOK)", key="horse_search_input")
+        if st.button("検索", key="horse_search_btn"):
+            if not search_name.strip():
+                st.warning("馬名を入力してください。")
+            else:
+                found = get_horse_full_history(search_name)
+                if found.empty:
+                    st.info(f"「{search_name}」に一致するデータが見つかりませんでした。")
+                else:
+                    st.session_state.horse_search_result = found
+
+        if "horse_search_result" in st.session_state:
+            found = st.session_state.horse_search_result
+            for name in found["horse_name"].unique():
+                sub = found[found["horse_name"] == name]
+                st.markdown(f"**{name}**({len(sub)}走)")
+                rows = []
+                for _, row in sub.iterrows():
+                    level = describe_race_level(row.get("race_class", ""), row.get("race_time_score", 0))
+                    notes = []
+                    if row.get("pace_note", PACE_NOTE_NONE) != PACE_NOTE_NONE:
+                        notes.append(row["pace_note"])
+                    if row.get("field_strength_note", FIELD_NOTE_NONE) != FIELD_NOTE_NONE:
+                        notes.append(row["field_strength_note"])
+                    if row.get("stretch_out_note", STRETCH_OUT_NOTE_NONE) != STRETCH_OUT_NOTE_NONE:
+                        notes.append(row["stretch_out_note"])
+                    rows.append({
+                        "開催日": row.get("race_date") or "不明",
+                        "レース": f"{row['venue']}{row['distance']}m{row['track_type']}",
+                        "着順": row["finish_rank"],
+                        "人気": row.get("popularity", ""),
+                        "オッズ": row.get("odds", ""),
+                        "レースレベル": level,
+                        "AIの着眼点": " / ".join(notes) if notes else "特になし",
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     section_head("1", "レース条件")
     col0, col1, col2, col3 = st.columns(4)
