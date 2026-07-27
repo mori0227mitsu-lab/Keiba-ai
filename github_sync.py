@@ -84,16 +84,20 @@ def append_rows_to_csv(token: str, repo: str, branch: str, path: str, new_rows: 
 def find_existing_race_ids(
     df: pd.DataFrame, races: list[dict],
 ) -> dict:
-    """races(各レースの venue/distance/track_type/race_date の辞書リスト)について、
-    既存CSV(df)の中に同じ組み合わせのレースが無いか調べる。
+    """races(各レースの venue/distance/track_type/race_date/horse_names の辞書リスト)
+    について、既存CSV(df)の中に同じ組み合わせのレースが無いか調べる。
 
     戻り値: {連番インデックス: 既存のrace_id} のdict(一致したものだけ)。
-    race_date(開催日)が両方に入っている場合はそれも一致条件に加える
-    (無い場合は venue/distance/track_typeだけで判定する)。
+    race_date(開催日)が両方に入っている場合はそれも一致条件に加える。
+    開催日が不明(空欄)な場合は、venue/distance/track_typeだけでは
+    「偶然同じ条件の別レース」を誤って同一視してしまう恐れがあるため、
+    出走馬名が実際に一定数重なっているかも必ず確認する。
     """
     matches = {}
     if df.empty or "venue" not in df.columns:
         return matches
+
+    has_name_col = "horse_name" in df.columns
 
     for i, race in enumerate(races):
         cond = (
@@ -102,18 +106,35 @@ def find_existing_race_ids(
             & (df["track_type"] == race.get("track_type"))
         )
         race_date = race.get("race_date")
-        if race_date and "race_date" in df.columns:
-            existing_date = df["race_date"].astype(str).str.strip()
-            # "0"は、過去のバージョンで列を揃えた際に空欄の代わりに入ってしまった値
-            # (現在は修正済みだが、既存データに残っている可能性があるため空欄扱いにする)
-            existing_date = existing_date.replace({"nan": "", "NaT": "", "None": "", "0": "", "0.0": ""})
-            # 既存データの開催日が「空欄(不明)」の行は、日付が違っていても一致とみなす
-            # (前回、日付を入力せずに保存したレースを、後から日付ありで上書きできるように)
-            date_ok = (existing_date == "") | (existing_date == str(race_date))
-            cond = cond & date_ok
-        found = df[cond]
-        if len(found):
-            matches[i] = int(found["race_id"].iloc[0])
+        candidate = df[cond]
+        if candidate.empty:
+            continue
+
+        new_names = set(race.get("horse_names") or [])
+
+        for existing_race_id in candidate["race_id"].unique():
+            sub = candidate[candidate["race_id"] == existing_race_id]
+            existing_date_raw = str(sub["race_date"].iloc[0]) if "race_date" in sub.columns else ""
+            existing_date = existing_date_raw.strip()
+            if existing_date in ("nan", "NaT", "None", "0", "0.0"):
+                existing_date = ""
+
+            if race_date and existing_date:
+                # 両方に開催日があるなら、日付が一致する場合だけ同一レースとみなす
+                if existing_date == str(race_date):
+                    matches[i] = int(existing_race_id)
+                    break
+                continue
+
+            # どちらかの開催日が不明な場合は、出走馬名の重なりで確認する
+            # (venue/distance/track_typeだけの一致は、偶然の可能性があるため)
+            if has_name_col and new_names:
+                existing_names = set(sub["horse_name"].dropna().astype(str))
+                overlap = new_names & existing_names
+                # 半分以上の馬名が重なっていれば、同一レースとみなす
+                if len(overlap) >= max(1, len(new_names) // 2):
+                    matches[i] = int(existing_race_id)
+                    break
     return matches
 
 
