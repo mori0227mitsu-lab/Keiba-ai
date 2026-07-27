@@ -27,17 +27,18 @@ CATEGORICAL_COLS = [
     "venue", "track_type", "condition", "sex", "jockey", "running_style",
     "day_bias", "straight_length", "trainer", "prev_pace_note",
     "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
+    "race_class", "prev_field_strength_note",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる/固定知識)
     "venue", "distance", "track_type", "condition", "straight_length", "day_bias",
-    "turn_direction", "hill",
+    "turn_direction", "hill", "race_class", "class_level",
     # 馬の基本情報(その場で分かる)
     "waku", "age", "sex", "jockey", "trainer", "running_style",
     "weight_carry", "horse_weight", "weight_diff", "popularity",
     # 過去走から引っ張る情報(予測時にも分かる)
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
-    "prev_pace_note",
+    "prev_pace_note", "prev_class_level", "prev_race_time_score", "prev_field_strength_note",
     # 馬ごとの右左回り・坂の得意不得意(過去の全成績から判定)
     "horse_turn_aptitude", "horse_hill_aptitude",
 ]
@@ -63,6 +64,90 @@ RAW_REQUIRED_COLS = [
 PACE_NOTE_NONE = "特になし"
 PACE_NOTE_LEADER_GRIT = "強い勝ち方(先行して上がり負けでも勝利)"
 PACE_NOTE_CLOSER_UNLUCKY = "展開不利(上がり1位なのに掲示板外)"
+
+FIELD_NOTE_NONE = "特になし"
+FIELD_NOTE_STRONG = "高評価(先着馬が後に好走)"
+
+
+def compute_race_time_level(df: pd.DataFrame) -> pd.DataFrame:
+    """レースごとに、同条件(距離・コース種別)の平均タイムと比べてどれくらい
+    速かった/遅かったかを数値化する(race_time_score)。
+
+    プラスが大きいほど「平均よりも速いタイムで決着した=レベルが高いレースだった
+    可能性がある」ことを表す。マイナスは平均より遅かったことを表す。
+    出走馬全体で共有する、レース単位の値になる。
+    """
+    df = df.copy()
+    if not {"distance", "track_type", "time_sec", "race_id"}.issubset(df.columns):
+        df["race_time_score"] = 0.0
+        return df
+
+    valid = df[df["time_sec"].notna() & (df["time_sec"] > 0)]
+    if valid.empty:
+        df["race_time_score"] = 0.0
+        return df
+
+    par_table = valid.groupby(["distance", "track_type"])["time_sec"].mean()
+    race_avg_time = valid.groupby("race_id")["time_sec"].mean()
+
+    def _score(row):
+        key = (row["distance"], row["track_type"])
+        rid = row["race_id"]
+        if rid not in race_avg_time.index or key not in par_table.index:
+            return 0.0
+        return round(par_table.loc[key] - race_avg_time.loc[rid], 2)
+
+    df["race_time_score"] = df.apply(_score, axis=1)
+    return df
+
+
+def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
+    """「このレースで自分より先着した馬が、後の別のレースで3着以内に入っているか」
+    を判定する(field_strength_note)。
+
+    先着した相手が後に活躍していれば、今回負けていても「レベルの高い相手に
+    負けていただけ」と評価できる材料になる。判定には、そのレースより後に
+    行われた(chronologicalに後の)レースの結果だけを使う。
+    """
+    df = df.copy()
+    required = {"horse_name", "race_id", "finish_rank"}
+    if not required.issubset(df.columns):
+        df["field_strength_note"] = FIELD_NOTE_NONE
+        return df
+
+    df = add_chronological_sort_key(df)
+    df = df.sort_values("_chron_key").reset_index(drop=True)
+
+    note = pd.Series(FIELD_NOTE_NONE, index=df.index)
+    # 馬名ごとの (chron_key, finish_rank) の履歴をあらかじめ作っておく(高速化のため)
+    history_by_name = {
+        name: g[["_chron_key", "finish_rank"]].values
+        for name, g in df.groupby("horse_name")
+    }
+
+    for race_id, g in df.groupby("race_id"):
+        g_sorted = g.sort_values("finish_rank")
+        for idx, row in g_sorted.iterrows():
+            ahead = g_sorted[g_sorted["finish_rank"] < row["finish_rank"]]
+            if ahead.empty:
+                continue
+            beaten_by_future_winner = False
+            for ahead_name in ahead["horse_name"]:
+                hist = history_by_name.get(ahead_name)
+                if hist is None:
+                    continue
+                future_top3 = any(
+                    (chron > row["_chron_key"]) and (rank <= 3)
+                    for chron, rank in hist
+                )
+                if future_top3:
+                    beaten_by_future_winner = True
+                    break
+            if beaten_by_future_winner:
+                note.at[idx] = FIELD_NOTE_STRONG
+
+    df["field_strength_note"] = note
+    return df
 
 
 def add_chronological_sort_key(df: pd.DataFrame) -> pd.DataFrame:
@@ -197,23 +282,29 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     df = compute_pace_note(df)
+    df = compute_race_time_level(df)
+    df = compute_field_strength_note(df)
 
     if "horse_name" not in df.columns:
         # 馬名が無いデータでは何もしない(既存のprev_rank等をそのまま使う)
-        for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
+        for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos", "prev_class_level", "prev_race_time_score"):
             if col not in df.columns:
                 df[col] = 0.0
         if "prev_pace_note" not in df.columns:
             df["prev_pace_note"] = PACE_NOTE_NONE
+        if "prev_field_strength_note" not in df.columns:
+            df["prev_field_strength_note"] = FIELD_NOTE_NONE
         return df
 
     df = add_chronological_sort_key(df)
     df = df.sort_values("_chron_key").reset_index(drop=True)
-    for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
+    for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos", "prev_class_level", "prev_race_time_score"):
         if col not in df.columns:
             df[col] = 0.0
     if "prev_pace_note" not in df.columns:
         df["prev_pace_note"] = PACE_NOTE_NONE
+    if "prev_field_strength_note" not in df.columns:
+        df["prev_field_strength_note"] = FIELD_NOTE_NONE
 
     # 馬ごとに、1つ前のレースの結果をシフトして取り込む
     grouped = df.groupby("horse_name", sort=False)
@@ -222,6 +313,8 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
         ("time_sec", "prev_time_sec"),
         ("agari_3f", "prev_agari_3f"),
         ("corner_pos", "prev_corner_pos"),
+        ("class_level", "prev_class_level"),
+        ("race_time_score", "prev_race_time_score"),
     ]:
         if src in df.columns:
             shifted = grouped[src].shift(1)
@@ -231,6 +324,10 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
     if "pace_note" in df.columns:
         shifted_pace = grouped["pace_note"].shift(1)
         df["prev_pace_note"] = shifted_pace.fillna(PACE_NOTE_NONE)
+
+    if "field_strength_note" in df.columns:
+        shifted_field = grouped["field_strength_note"].shift(1)
+        df["prev_field_strength_note"] = shifted_field.fillna(FIELD_NOTE_NONE)
 
     return df
 
@@ -249,7 +346,8 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
     # 足りない列を既定値で補う(古い形式のデータや、予測画面からの入力に対応)
     numeric_defaults = {
         "prev_time_sec": 0.0, "prev_agari_3f": 0.0, "prev_corner_pos": 0.0,
-        "prev_rank": 0, "rest_weeks": 0,
+        "prev_rank": 0, "rest_weeks": 0, "class_level": 0, "prev_class_level": 0,
+        "prev_race_time_score": 0.0,
     }
     for col, default in numeric_defaults.items():
         if col not in df.columns:
@@ -258,6 +356,10 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         df["trainer"] = "UNK"
     if "prev_pace_note" not in df.columns:
         df["prev_pace_note"] = PACE_NOTE_NONE
+    if "prev_field_strength_note" not in df.columns:
+        df["prev_field_strength_note"] = FIELD_NOTE_NONE
+    if "race_class" not in df.columns:
+        df["race_class"] = "未勝利"
     if "turn_direction" not in df.columns:
         df["turn_direction"] = df["venue"].map(COURSE_TURN).fillna("右") if "venue" in df.columns else "右"
     if "hill" not in df.columns:
