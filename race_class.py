@@ -42,3 +42,26 @@ def detect_race_class(text: str):
 def is_graded(race_class: str) -> bool:
     """重賞(G1/G2/G3)かどうかを返す。"""
     return race_class in GRADED_LABELS
+
+
+def describe_race_level(race_class: str, race_time_score) -> str:
+    """レース格・タイム水準から、「レベルが高い/普通/低い」を一言で表現する。
+
+    重賞・オープン・Lなど、格自体で高レベルと分かる場合はそれを使う。
+    新馬・未勝利・条件戦などは、タイム水準(race_time_score)で判定する。
+    """
+    if race_class in ("G1", "G2", "G3"):
+        return f"レベル高い({race_class})"
+    if race_class in ("L(リステッド)", "オープン"):
+        return f"レベルやや高い({race_class})"
+
+    try:
+        score = float(race_time_score)
+    except (TypeError, ValueError):
+        score = 0.0
+
+    if score >= 1.0:
+        return "レベル高め(平均より速いタイム)"
+    if score <= -1.0:
+        return "レベル低め(平均より遅いタイム)"
+    return "普通"
