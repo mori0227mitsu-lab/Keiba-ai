@@ -128,11 +128,17 @@ def find_existing_race_ids(
 
             # どちらかの開催日が不明な場合は、出走馬名の重なりで確認する
             # (venue/distance/track_typeだけの一致は、偶然の可能性があるため)
+            # 「同じ場所・距離で複数の馬が2走目として再出走している」だけの
+            # 別レースを誤って同一視しないよう、以下の両方を満たす場合だけ
+            # 同一レースとみなす:
+            #   - 頭数の差が2頭以内
+            #   - 少ない方の頭数の80%以上が重なっている
             if has_name_col and new_names:
                 existing_names = set(sub["horse_name"].dropna().astype(str))
                 overlap = new_names & existing_names
-                # 半分以上の馬名が重なっていれば、同一レースとみなす
-                if len(overlap) >= max(1, len(new_names) // 2):
+                smaller_size = min(len(new_names), len(existing_names))
+                count_diff = abs(len(new_names) - len(existing_names))
+                if count_diff <= 2 and smaller_size > 0 and len(overlap) / smaller_size >= 0.8:
                     matches[i] = int(existing_race_id)
                     break
     return matches
