@@ -24,6 +24,7 @@ from model.train_model import (
     FIELD_NOTE_NONE, compute_race_time_level, compute_field_strength_note,
     STRETCH_OUT_NOTE_NONE, compute_stretch_out_note,
     quinella_proba, wide_proba, trio_proba, trifecta_proba, compute_expected_values,
+    distance_category, compute_horse_distance_aptitude,
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
@@ -189,6 +190,94 @@ def get_horse_full_history(horse_name_query: str) -> pd.DataFrame:
     return matched
 
 
+def _format_time(time_sec):
+    """秒数を「1:10.8」のような表記に変換する。"""
+    try:
+        t = float(time_sec)
+    except (TypeError, ValueError):
+        return "不明"
+    minutes = int(t // 60)
+    seconds = t - minutes * 60
+    if minutes > 0:
+        return f"{minutes}:{seconds:04.1f}"
+    return f"{seconds:.1f}"
+
+
+def generate_scouting_memos(max_n: int = 5) -> list:
+    """展開評価・距離延長候補・相手のレベル評価が付いた馬について、
+    そのままnoteに貼れる下書き文章(1頭1段落)のリストを生成する。
+
+    直近(chronological順で新しい)の該当馬から並べ、max_n件まで返す。
+    """
+    if not os.path.exists(DATA_PATH):
+        return []
+    hist = pd.read_csv(DATA_PATH)
+    if "horse_name" not in hist.columns:
+        return []
+
+    hist = hist.dropna(subset=["horse_name"])
+    hist = hist[hist["horse_name"].astype(str).str.strip() != ""]
+    if hist.empty:
+        return []
+
+    hist = compute_pace_note(hist)
+    hist = compute_race_time_level(hist)
+    hist = compute_field_strength_note(hist)
+    hist = compute_stretch_out_note(hist)
+    hist = add_chronological_sort_key(hist)
+    hist = hist.sort_values("_chron_key", ascending=False)  # 新しい順
+
+    notable = hist[
+        (hist["pace_note"] != PACE_NOTE_NONE)
+        | (hist["stretch_out_note"] != STRETCH_OUT_NOTE_NONE)
+        | (hist["field_strength_note"] != FIELD_NOTE_NONE)
+    ]
+    notable = notable.head(max_n)
+
+    drafts = []
+    for _, row in notable.iterrows():
+        name = row.get("horse_name", "不明")
+        venue = row.get("venue", "")
+        distance = row.get("distance", "")
+        track_type = row.get("track_type", "")
+        condition = row.get("condition", "")
+        finish = row.get("finish_rank", "")
+        popularity = row.get("popularity", "")
+        odds = row.get("odds", "")
+        time_str = _format_time(row.get("time_sec"))
+        agari = row.get("agari_3f", "")
+
+        lines = [f"■ {name}({venue}{distance}m{track_type}・{condition}/{finish}着・{popularity}番人気・オッズ{odds}倍)", ""]
+        lines.append(f"タイムは{time_str}、上がり3Fは{agari}でした。")
+
+        note_texts = []
+        if row.get("pace_note") == "強い勝ち方(先行して上がり負けでも勝利)":
+            note_texts.append(
+                "先行して上がりは平凡だったにも関わらず好走しています。展開関係なく地力で押し切れる、"
+                "素質を感じさせる内容です。"
+            )
+        elif row.get("pace_note") == "展開不利(上がり1位なのに掲示板外)":
+            note_texts.append(
+                "上がり3Fはこのレースで最速だったにも関わらず掲示板に載れませんでした。位置取りや展開の綾で"
+                "割を食った可能性があります。"
+            )
+        if row.get("stretch_out_note", STRETCH_OUT_NOTE_NONE) != STRETCH_OUT_NOTE_NONE:
+            note_texts.append(
+                "短距離であまり追走できておらず、それでも上がりは目立って速い内容でした。"
+                "距離が延びれば足が生きてくるかもしれません。次に距離延長で出てきたら注目です。"
+            )
+        if row.get("field_strength_note", FIELD_NOTE_NONE) != FIELD_NOTE_NONE:
+            note_texts.append(
+                "このレースで僅差の先着を許した馬のうち複数が、その後の別レースで掲示板(5着以内)に"
+                "載っています。相手のレベルが高かった可能性があり、着順以上に評価しても良さそうです。"
+            )
+
+        lines.append(" ".join(note_texts))
+        drafts.append("\n".join(lines))
+
+    return drafts
+
+
 def lookup_horse_history() -> pd.DataFrame:
     """data/dummy_races.csv(実データ)から、各馬名のレース結果を取得する。
 
@@ -217,14 +306,16 @@ def lookup_horse_history() -> pd.DataFrame:
     return latest, hist
 
 
-def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current_hill: str):
-    """ある馬の全過去成績から、今回のレース条件(右左回り・坂)との得意不得意を判定する。
+def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current_hill: str, current_distance=None):
+    """ある馬の全過去成績から、今回のレース条件(右左回り・坂・距離区分)との
+    得意不得意を判定する。
 
     予測対象のレースはまだ走っていないので、その馬の「これまでの全成績」を使って良い
-    (学習時のcompute_horse_course_aptitudeとは違い、未来のデータリークの心配は無い)。
+    (学習時のcompute_horse_course_aptitude/compute_horse_distance_aptitudeとは違い、
+    未来のデータリークの心配は無い)。
     """
     if name_hist.empty or "venue" not in name_hist.columns or "finish_rank" not in name_hist.columns:
-        return APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        return APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
 
     turns = name_hist["venue"].map(COURSE_TURN).fillna("右")
     hills = name_hist["venue"].map(COURSE_HILL).fillna("坂なし")
@@ -244,7 +335,14 @@ def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current
 
     turn_apt = _judge(turns == current_turn, turns != current_turn, f"{current_turn}回り")
     hill_apt = _judge(hills == current_hill, hills != current_hill, current_hill)
-    return turn_apt, hill_apt
+
+    dist_apt = APTITUDE_UNKNOWN
+    if current_distance is not None and "distance" in name_hist.columns:
+        cats = name_hist["distance"].apply(distance_category)
+        cur_cat = distance_category(current_distance)
+        dist_apt = _judge(cats == cur_cat, cats != cur_cat, cur_cat)
+
+    return turn_apt, hill_apt, dist_apt
 
 
 def _normalize_name(name: str) -> str:
@@ -254,7 +352,7 @@ def _normalize_name(name: str) -> str:
 
 def apply_horse_history(
     df: pd.DataFrame, history: pd.DataFrame, full_history: pd.DataFrame,
-    current_turn: str, current_hill: str,
+    current_turn: str, current_hill: str, current_distance=None,
 ):
     """出走馬テーブルのhorse_nameを使って前走成績(prev_rank)を自動入力する。
 
@@ -294,11 +392,13 @@ def apply_horse_history(
             df.at[i, "prev_rank"] = int(h["finish_rank"])
             matched += 1
 
-        # この馬の全過去成績から、今回のコース条件との得意不得意を判定
-        turn_apt, hill_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        # この馬の全過去成績から、今回のコース条件・距離との得意不得意を判定
+        turn_apt, hill_apt, dist_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
         if not full_history.empty and "horse_name" in full_history.columns:
             name_hist = full_history[full_history["horse_name"] == actual_key]
-            turn_apt, hill_apt = compute_current_aptitude(name_hist, current_turn, current_hill)
+            turn_apt, hill_apt, dist_apt = compute_current_aptitude(
+                name_hist, current_turn, current_hill, current_distance
+            )
 
         extra[raw_name] = {
             "prev_time_sec": h.get("time_sec", 0) if pd.notna(h.get("time_sec")) else 0,
@@ -311,6 +411,7 @@ def apply_horse_history(
             "prev_stretch_out_note": h.get("stretch_out_note", STRETCH_OUT_NOTE_NONE) if pd.notna(h.get("stretch_out_note")) else STRETCH_OUT_NOTE_NONE,
             "horse_turn_aptitude": turn_apt,
             "horse_hill_aptitude": hill_apt,
+            "horse_distance_aptitude": dist_apt,
         }
     return df, matched, extra, unmatched_suggestions
 
@@ -685,6 +786,23 @@ def main():
                     })
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    with st.expander("📝 注目馬メモを自動生成する(note下書き)"):
+        st.caption(
+            "展開評価・距離延長候補・相手のレベル評価が付いた馬を自動でリストアップし、"
+            "そのままnoteに貼れる下書き文章を作ります(直近の該当馬から新しい順)。"
+        )
+        max_n = st.slider("生成する件数(上限)", 1, 20, 5, key="scouting_memo_n")
+        if st.button("下書きを生成する", key="scouting_memo_btn"):
+            drafts = generate_scouting_memos(max_n=max_n)
+            if not drafts:
+                st.info("現時点で該当する馬が見つかりませんでした。")
+            else:
+                st.session_state.scouting_memo_drafts = drafts
+
+        if "scouting_memo_drafts" in st.session_state:
+            full_text = "\n\n".join(st.session_state.scouting_memo_drafts)
+            st.text_area("下書き(コピーしてnoteに貼ってください)", value=full_text, height=400)
+
     section_head("1", "レース条件")
     col0, col1, col2, col3 = st.columns(4)
     with col0:
@@ -812,7 +930,7 @@ def main():
             st.session_state.autofill_suggestions = {}
         else:
             updated, matched, extra, suggestions = apply_horse_history(
-                edited, history, full_history, turn_direction, hill
+                edited, history, full_history, turn_direction, hill, distance
             )
             st.session_state.horse_df = updated
             st.session_state.horse_table_version += 1
@@ -828,6 +946,8 @@ def main():
                     parts.append(f"回り適性: {e['horse_turn_aptitude']}")
                 if e.get("horse_hill_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
                     parts.append(f"坂適性: {e['horse_hill_aptitude']}")
+                if e.get("horse_distance_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
+                    parts.append(f"距離適性: {e['horse_distance_aptitude']}")
                 if parts:
                     notes[n] = " / ".join(parts)
             st.session_state.autofill_notes = notes
@@ -879,6 +999,7 @@ def main():
         df["prev_stretch_out_note"] = STRETCH_OUT_NOTE_NONE
         df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
         df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
+        df["horse_distance_aptitude"] = APTITUDE_UNKNOWN
         if prev_extra and "horse_name" in df.columns:
             for i, row in df.iterrows():
                 name = str(row.get("horse_name", "")).strip()
