@@ -496,6 +496,7 @@ def train(data_path: str, out_path: str, verbose: bool = True) -> dict:
     df = load_data(data_path)
     X, encoders = build_features(df)
     y = df[TARGET_COL]
+    y_win = (df["finish_rank"] == 1).astype(int)  # 勝率(1着)予測用のターゲット
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
@@ -509,9 +510,18 @@ def train(data_path: str, out_path: str, verbose: bool = True) -> dict:
     if verbose:
         proba = model.predict_proba(X_test)[:, 1]
         auc = roc_auc_score(y_test, proba)
-        print(f"検証AUC: {auc:.3f} (0.5=ランダム, 1.0=完璧)")
+        print(f"検証AUC(複勝): {auc:.3f} (0.5=ランダム, 1.0=完璧)")
 
-    bundle = {"model": model, "encoders": encoders, "feature_cols": FEATURE_COLS}
+    # 勝率(1着)予測モデル。買い目の期待値計算(単勝・馬連・三連複など)に使う。
+    win_model = GradientBoostingClassifier(
+        n_estimators=200, max_depth=3, learning_rate=0.05, random_state=42
+    )
+    win_model.fit(X, y_win)
+
+    bundle = {
+        "model": model, "win_model": win_model,
+        "encoders": encoders, "feature_cols": FEATURE_COLS,
+    }
     if out_path:
         joblib.dump(bundle, out_path)
         if verbose:
@@ -616,6 +626,73 @@ def main():
     )
     args = parser.parse_args()
     train(args.data, args.out)
+
+
+# --- 買い目の期待値計算(ハーヴィルの公式による近似) ---
+#
+# 各馬の「勝率」だけから、連対系馬券(馬連・ワイド・三連複・三連単など)の
+# 的中確率を近似する古典的な方法。実際のオッズに影響される厳密な確率ではないが、
+# 実務上よく使われる近似(消去法的な考え方)。
+
+def _exacta_proba(p_i: float, p_j: float) -> float:
+    """1着i・2着jになる確率(馬単)の近似値。"""
+    denom = 1 - p_i
+    if denom <= 0:
+        return 0.0
+    return p_i * (p_j / denom)
+
+
+def _trifecta_proba(p_i: float, p_j: float, p_k: float) -> float:
+    """1着i・2着j・3着kになる確率(三連単)の近似値。"""
+    denom1 = 1 - p_i
+    denom2 = 1 - p_i - p_j
+    if denom1 <= 0 or denom2 <= 0:
+        return 0.0
+    return p_i * (p_j / denom1) * (p_k / denom2)
+
+
+def quinella_proba(p_i: float, p_j: float) -> float:
+    """馬連(iとjが1-2着、順不同)の的中確率。"""
+    return _exacta_proba(p_i, p_j) + _exacta_proba(p_j, p_i)
+
+
+def trio_proba(p_i: float, p_j: float, p_k: float) -> float:
+    """三連複(i,j,kが1-3着、順不同)の的中確率。"""
+    import itertools
+    total = 0.0
+    for a, b, c in itertools.permutations([p_i, p_j, p_k]):
+        total += _trifecta_proba(a, b, c)
+    return total
+
+
+def wide_proba(p_i: float, p_j: float, others: list) -> float:
+    """ワイド(iとjが共に3着以内、順不同)の的中確率。
+
+    othersには、レースに出走する「i,j以外」の全馬の勝率を渡す
+    (三連複の考え方を使い、iとjが3着以内に入る全パターンを足し上げる)。
+    """
+    total = 0.0
+    for p_k in others:
+        total += trio_proba(p_i, p_j, p_k)
+    return total
+
+
+def trifecta_proba(p_i: float, p_j: float, p_k: float) -> float:
+    """三連単(1着i・2着j・3着kの着順固定)の的中確率。"""
+    return _trifecta_proba(p_i, p_j, p_k)
+
+
+def compute_expected_values(bets: list) -> list:
+    """買い目のリスト(各要素は {"種類":str, "対象":str, "確率":float, "オッズ":float})
+    から、期待値(確率×オッズ)を計算して付与する。
+    """
+    result = []
+    for bet in bets:
+        proba = bet.get("確率", 0.0)
+        odds = bet.get("オッズ", 0.0)
+        ev = round(proba * odds, 3) if odds else None
+        result.append({**bet, "期待値": ev})
+    return result
 
 
 if __name__ == "__main__":
