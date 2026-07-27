@@ -480,14 +480,16 @@ def main():
                     collect_text, start_race_id=start_id, race_date=str(collect_date),
                 )
 
-                # 既存データと(開催場・距離・コース種別・開催日)が同じレースが
-                # あれば、新しいrace_idではなく既存のrace_idを使う(=上書きになる)
+                # 既存データと(開催場・距離・コース種別・開催日、または出走馬名の重なり)
+                # が一致するレースがあれば、新しいrace_idではなく既存のrace_idを使う(=上書きになる)
                 races_info = []
                 for rid in sorted(preview_df["race_id"].unique()):
-                    row = preview_df[preview_df["race_id"] == rid].iloc[0]
+                    race_rows = preview_df[preview_df["race_id"] == rid]
+                    row = race_rows.iloc[0]
                     races_info.append({
                         "venue": row["venue"], "distance": row["distance"],
                         "track_type": row["track_type"], "race_date": row.get("race_date"),
+                        "horse_names": race_rows["horse_name"].dropna().astype(str).tolist(),
                     })
                 matches = find_existing_race_ids(existing_df, races_info)
 
