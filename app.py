@@ -917,6 +917,13 @@ def main():
             "popularity": "人気", "odds": "オッズ",
         })
 
+        # 表示部分はボタンの外(session_state経由)で行う。
+        # ここでボタンブロック内のままにすると、下の買い目セレクトボックスを
+        # 操作するたびに画面が再実行されて予測結果ごと消えてしまうため。
+        st.session_state.prediction_result = result
+
+    if "prediction_result" in st.session_state:
+        result = st.session_state.prediction_result
         section_head("3", "予測結果")
 
         # 上位ピックアップを見やすく表示
