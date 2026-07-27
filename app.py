@@ -21,9 +21,11 @@ import streamlit as st
 from model.train_model import (
     FEATURE_COLS, RAW_REQUIRED_COLS, build_features, compute_pace_note,
     PACE_NOTE_NONE, APTITUDE_UNKNOWN, backtest, add_chronological_sort_key,
+    FIELD_NOTE_NONE, compute_race_time_level, compute_field_strength_note,
 )
 from data_collector import parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
+from race_class import RACE_CLASS_PATTERNS
 from course_info import (
     COURSE_DISTANCES,
     COURSE_HILL,
@@ -175,6 +177,8 @@ def lookup_horse_history() -> pd.DataFrame:
         return pd.DataFrame(), pd.DataFrame()
 
     hist = compute_pace_note(hist)  # 各レース内での展開評価(強い勝ち方/展開不利)を付与
+    hist = compute_race_time_level(hist)  # レースタイムの水準を付与
+    hist = compute_field_strength_note(hist)  # 先着馬のその後の評価を付与
     hist = add_chronological_sort_key(hist)
     hist = hist.sort_values("_chron_key")
     latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
@@ -269,6 +273,9 @@ def apply_horse_history(
             "prev_agari_3f": h.get("agari_3f", 0) if pd.notna(h.get("agari_3f")) else 0,
             "prev_corner_pos": h.get("corner_pos", 0) if pd.notna(h.get("corner_pos")) else 0,
             "prev_pace_note": h.get("pace_note", PACE_NOTE_NONE) if pd.notna(h.get("pace_note")) else PACE_NOTE_NONE,
+            "prev_class_level": h.get("class_level", 0) if pd.notna(h.get("class_level")) else 0,
+            "prev_race_time_score": h.get("race_time_score", 0) if pd.notna(h.get("race_time_score")) else 0,
+            "prev_field_strength_note": h.get("field_strength_note", FIELD_NOTE_NONE) if pd.notna(h.get("field_strength_note")) else FIELD_NOTE_NONE,
             "horse_turn_aptitude": turn_apt,
             "horse_hill_aptitude": hill_apt,
         }
@@ -611,11 +618,19 @@ def main():
     straight_length = COURSE_STRAIGHT_LENGTH[venue]
     turn_direction = COURSE_TURN[venue]
     hill = COURSE_HILL[venue]
-    day_bias = st.selectbox(
-        "今日の馬場傾向",
-        DAY_BIAS_OPTIONS,
-        help="レース当日の実況・データを見て、内外や脚質の有利不利があれば選んでください。分からなければ「フラット」でOKです。",
-    )
+
+    RACE_CLASS_OPTIONS = ["新馬", "未勝利", "1勝クラス", "2勝クラス", "3勝クラス", "オープン", "L(リステッド)", "G3", "G2", "G1"]
+    RACE_CLASS_LEVELS = {"新馬": 0, "未勝利": 0, "1勝クラス": 1, "2勝クラス": 2, "3勝クラス": 3, "オープン": 4, "L(リステッド)": 4.5, "G3": 5, "G2": 6, "G1": 7}
+    col4, col5 = st.columns(2)
+    with col4:
+        race_class = st.selectbox("レース格", RACE_CLASS_OPTIONS, index=1)
+        class_level = RACE_CLASS_LEVELS[race_class]
+    with col5:
+        day_bias = st.selectbox(
+            "今日の馬場傾向",
+            DAY_BIAS_OPTIONS,
+            help="レース当日の実況・データを見て、内外や脚質の有利不利があれば選んでください。分からなければ「フラット」でOKです。",
+        )
     st.caption(
         f"📏 {venue}: 直線{straight_length} / {turn_direction}回り / {hill}"
         "(固定情報として自動反映されます)"
@@ -768,12 +783,15 @@ def main():
         df["straight_length"] = straight_length
         df["turn_direction"] = turn_direction
         df["hill"] = hill
+        df["race_class"] = race_class
+        df["class_level"] = class_level
 
         # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順・展開評価)をマージ
         prev_extra = st.session_state.get("prev_extra", {})
-        for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos"):
+        for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos", "prev_class_level", "prev_race_time_score"):
             df[col] = 0.0
         df["prev_pace_note"] = PACE_NOTE_NONE
+        df["prev_field_strength_note"] = FIELD_NOTE_NONE
         df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
         df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
         if prev_extra and "horse_name" in df.columns:
