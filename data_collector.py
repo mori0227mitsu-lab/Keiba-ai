@@ -9,6 +9,7 @@ import re
 import pandas as pd
 
 from course_info import COURSE_STRAIGHT_LENGTH
+from race_class import detect_race_class
 
 HEADER_RE = re.compile(
     r"発走\s*/\s*(?P<track>芝|ダ)(?P<distance>\d+)m.*?/\s*馬場:(?P<condition>\S+)\n"
@@ -41,8 +42,8 @@ COND_FIX = {"稍": "稍重", "不": "不良"}
 
 CSV_COLS = [
     "race_id", "race_date", "venue", "distance", "track_type", "condition", "straight_length",
-    "day_bias", "horse_num", "horse_name", "waku", "sex", "age", "jockey", "trainer",
-    "running_style", "weight_carry", "horse_weight", "weight_diff",
+    "day_bias", "race_class", "class_level", "horse_num", "horse_name", "waku", "sex", "age",
+    "jockey", "trainer", "running_style", "weight_carry", "horse_weight", "weight_diff",
     "prev_rank", "rest_weeks", "popularity", "odds", "finish_rank",
     "time_sec", "agari_3f", "corner_pos",
 ]
@@ -168,6 +169,7 @@ def _parse_one_block(block: str, race_id: int, race_date: str = "") -> pd.DataFr
     track_type = "芝" if hm.group("track") == "芝" else "ダート"
     distance = hm.group("distance")
     straight = COURSE_STRAIGHT_LENGTH.get(venue, "普通")
+    race_class, class_level = detect_race_class(block)
 
     horses = list(HORSE_RE.finditer(block))
     if not horses:
@@ -204,6 +206,8 @@ def _parse_one_block(block: str, race_id: int, race_date: str = "") -> pd.DataFr
             "condition": condition,
             "straight_length": straight,
             "day_bias": "フラット",
+            "race_class": race_class,
+            "class_level": class_level,
             "horse_num": int(h.group("num")),
             "horse_name": _clean(h.group("name")),
             "waku": int(h.group("waku")),
