@@ -605,10 +605,15 @@ def main():
             "今まで貯まったデータを使い、「そのレースを学習に使わずに予測する」形で"
             "印(◎○▲△)ごとの複勝率・勝率を検証します。データが増えるほど信頼できる結果になります。"
         )
+        age_filter = st.selectbox(
+            "対象馬齢",
+            ["全馬", "2歳馬のみ", "3歳以上のみ"],
+            help="他の馬齢のデータを混ぜても、特定の馬齢の精度が落ちていないか確認したい時に使ってください。",
+        )
         if st.button("バックテストを実行"):
             with st.spinner("検証中です(データ量によって数秒〜数十秒かかります)..."):
                 try:
-                    st.session_state.backtest_result = backtest(DATA_PATH)
+                    st.session_state.backtest_result = backtest(DATA_PATH, age_filter=age_filter)
                 except Exception as e:
                     st.error(f"検証に失敗しました: {e}")
 
