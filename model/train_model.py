@@ -27,7 +27,7 @@ CATEGORICAL_COLS = [
     "venue", "track_type", "condition", "sex", "jockey", "running_style",
     "day_bias", "straight_length", "trainer", "prev_pace_note",
     "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
-    "race_class", "prev_field_strength_note",
+    "race_class", "prev_field_strength_note", "prev_stretch_out_note",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる/固定知識)
@@ -39,6 +39,7 @@ FEATURE_COLS = [
     # 過去走から引っ張る情報(予測時にも分かる)
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
     "prev_pace_note", "prev_class_level", "prev_race_time_score", "prev_field_strength_note",
+    "prev_stretch_out_note",
     # 馬ごとの右左回り・坂の得意不得意(過去の全成績から判定)
     "horse_turn_aptitude", "horse_hill_aptitude",
 ]
@@ -289,6 +290,63 @@ def compute_pace_note(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+STRETCH_OUT_NOTE_NONE = "特になし"
+STRETCH_OUT_NOTE_CANDIDATE = "距離延長で変わるかも(短距離で追走できず上がり超速)"
+
+STRETCH_OUT_MAX_DISTANCE = 1400   # これ以下の距離を「短距離」とみなす
+STRETCH_OUT_AGARI_MARGIN = 0.3    # レース平均よりこの秒数以上速ければ「超速」とみなす
+
+
+def compute_stretch_out_note(df: pd.DataFrame) -> pd.DataFrame:
+    """短距離で後方から追走できず、それでも上がりが際立って速かった馬を判定する。
+
+    「ただの追い込み脚質」と区別するため、以下をすべて満たす場合だけ判定する。
+    - 脚質が差し・追い込み
+    - 距離が短距離(STRETCH_OUT_MAX_DISTANCE以下)
+    - 通過順がそのレースの後方25%
+    - 上がり3Fがレース平均よりSTRETCH_OUT_AGARI_MARGIN秒以上速い
+    - 3着以内に入れていない(掲示板を外している)
+
+    あくまで「距離を伸ばせば変わるかもしれない」という仮説的な着眼点であり、
+    断定的な判定ではない点に注意(単なる追い込み脚質である可能性も残る)。
+    """
+    df = df.copy()
+    required = {"running_style", "distance", "corner_pos", "agari_3f", "finish_rank", "race_id"}
+    if not required.issubset(df.columns):
+        df["stretch_out_note"] = STRETCH_OUT_NOTE_NONE
+        return df
+
+    df["stretch_out_note"] = STRETCH_OUT_NOTE_NONE
+
+    def _tag_race(g: pd.DataFrame) -> pd.Series:
+        n = len(g)
+        tags = pd.Series(STRETCH_OUT_NOTE_NONE, index=g.index)
+        if n < 2:
+            return tags
+
+        is_closer = g["running_style"].isin(["差し", "追い込み"])
+        is_short = g["distance"] <= STRETCH_OUT_MAX_DISTANCE
+        missed_board = g["finish_rank"] > 3
+
+        # 通過順(数字が大きいほど後方)が全体の後方25%かどうか
+        corner_rank = g["corner_pos"].rank(method="min", ascending=False)  # 1=最後方
+        is_deep = corner_rank <= max(1, round(n * 0.25))
+
+        # 上がり3Fがレース平均よりはっきり速いかどうか
+        avg_agari = g["agari_3f"].mean()
+        is_fast_agari = (avg_agari - g["agari_3f"]) >= STRETCH_OUT_AGARI_MARGIN
+
+        cond = is_closer & is_short & missed_board & is_deep & is_fast_agari
+        tags[cond] = STRETCH_OUT_NOTE_CANDIDATE
+        return tags
+
+    tagged = pd.Series(STRETCH_OUT_NOTE_NONE, index=df.index)
+    for _, g in df.groupby("race_id", group_keys=False):
+        tagged.loc[g.index] = _tag_race(g)
+    df["stretch_out_note"] = tagged
+    return df
+
+
 def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
     """馬名(horse_name)を手がかりに、同じ馬の「前走」情報を自動で埋める。
 
@@ -300,6 +358,7 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
     df = compute_pace_note(df)
     df = compute_race_time_level(df)
     df = compute_field_strength_note(df)
+    df = compute_stretch_out_note(df)
 
     if "horse_name" not in df.columns:
         # 馬名が無いデータでは何もしない(既存のprev_rank等をそのまま使う)
@@ -310,6 +369,8 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
             df["prev_pace_note"] = PACE_NOTE_NONE
         if "prev_field_strength_note" not in df.columns:
             df["prev_field_strength_note"] = FIELD_NOTE_NONE
+        if "prev_stretch_out_note" not in df.columns:
+            df["prev_stretch_out_note"] = STRETCH_OUT_NOTE_NONE
         return df
 
     df = add_chronological_sort_key(df)
@@ -321,6 +382,8 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
         df["prev_pace_note"] = PACE_NOTE_NONE
     if "prev_field_strength_note" not in df.columns:
         df["prev_field_strength_note"] = FIELD_NOTE_NONE
+    if "prev_stretch_out_note" not in df.columns:
+        df["prev_stretch_out_note"] = STRETCH_OUT_NOTE_NONE
 
     # 馬ごとに、1つ前のレースの結果をシフトして取り込む
     grouped = df.groupby("horse_name", sort=False)
@@ -344,6 +407,10 @@ def fill_prev_from_history(df: pd.DataFrame) -> pd.DataFrame:
     if "field_strength_note" in df.columns:
         shifted_field = grouped["field_strength_note"].shift(1)
         df["prev_field_strength_note"] = shifted_field.fillna(FIELD_NOTE_NONE)
+
+    if "stretch_out_note" in df.columns:
+        shifted_stretch = grouped["stretch_out_note"].shift(1)
+        df["prev_stretch_out_note"] = shifted_stretch.fillna(STRETCH_OUT_NOTE_NONE)
 
     return df
 
@@ -374,6 +441,8 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         df["prev_pace_note"] = PACE_NOTE_NONE
     if "prev_field_strength_note" not in df.columns:
         df["prev_field_strength_note"] = FIELD_NOTE_NONE
+    if "prev_stretch_out_note" not in df.columns:
+        df["prev_stretch_out_note"] = STRETCH_OUT_NOTE_NONE
     if "race_class" not in df.columns:
         df["race_class"] = "未勝利"
     if "turn_direction" not in df.columns:
