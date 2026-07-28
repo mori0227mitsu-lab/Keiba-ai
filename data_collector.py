@@ -7,9 +7,49 @@ app.py の「データを集める」機能から呼び出す。
 import re
 
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 
 from course_info import COURSE_STRAIGHT_LENGTH
 from race_class import detect_race_class
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def fetch_netkeiba_text(url: str) -> str:
+    """netkeibaのレースページ(出馬表・結果どちらも)をURLから取得し、
+
+    表の中身をタブ・改行区切りのテキストに変換して返す。
+    これまでの「コピペしたテキストをパースする」処理(parse_netkeiba_shutuba等)に
+    そのまま渡せる形式を目指す。取得や変換に失敗した場合は例外を投げる。
+    """
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"ページの取得に失敗しました: {e}")
+
+    resp.encoding = resp.apparent_encoding or "euc-jp"
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    # メインコンテンツらしき部分(出馬表・結果の表を含むエリア)を探す。
+    # netkeibaのページ構造は変わることがあるため、複数の候補を順に試す。
+    candidates = soup.select(
+        "table, .RaceTable01, .Shutuba_Table, #contents, main, body"
+    )
+    target = candidates[0] if candidates else soup
+
+    text = target.get_text(separator="\t", strip=False)
+    # 連続する空白行を1行にまとめて読みやすくする
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln.strip() != ""]
+    return "\n".join(lines)
 
 HEADER_RE = re.compile(
     r"発走\s*/\s*(?P<track>芝|ダ)(?P<distance>\d+)m.*?/\s*馬場:(?P<condition>\S+)\n"
