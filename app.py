@@ -28,7 +28,7 @@ from model.train_model import (
 )
 from data_collector import (
     parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df,
-    fetch_netkeiba_text,
+    fetch_netkeiba_text, fetch_and_parse_netkeiba_result,
 )
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
 from race_class import RACE_CLASS_PATTERNS, describe_race_level
@@ -595,20 +595,29 @@ def main():
 
         with st.expander("🔗 URLを貼るだけで取得する(実験的機能)"):
             st.caption(
-                "コピペの代わりに、netkeibaの結果ページのURLを貼って自動取得を試せます。"
-                "複数レースの場合は1つずつ取得してください。うまく取れない場合は上のコピペ方式を使ってください。"
+                "コピペの代わりに、netkeibaの結果ページのURLを貼って自動取得できます。"
+                "1回につき1レース分です。うまく取れない場合は上のコピペ方式を使ってください。"
             )
             result_url = st.text_input("結果ページのURL", key="result_url_input")
-            if st.button("URLから取得", key="result_url_fetch"):
+            if st.button("URLから取得してプレビュー", key="result_url_fetch"):
                 try:
                     with st.spinner("取得中..."):
-                        fetched_result_text = fetch_netkeiba_text(result_url)
-                    st.session_state.collect_paste_version += 1
-                    st.session_state[f"collect_paste_{st.session_state.collect_paste_version}"] = fetched_result_text
-                    st.toast("取得しました。下の欄に反映しています。", icon="✅")
+                        if use_auto_id:
+                            token = st.secrets["github_token"]
+                            repo = st.secrets["github_repo"]
+                            branch = st.secrets.get("github_branch", "main")
+                            existing_df_u, _ = fetch_csv(token, repo, branch, "data/dummy_races.csv")
+                            start_id_u = (int(existing_df_u["race_id"].max()) + 1) if len(existing_df_u) else 9001
+                        else:
+                            start_id_u = int(manual_start_id)
+                        url_preview_df = fetch_and_parse_netkeiba_result(
+                            result_url, race_id=start_id_u, race_date=str(collect_date),
+                        )
+                    st.session_state.collect_preview = url_preview_df
+                    st.toast(f"{len(url_preview_df)}頭分を取得しました。下のプレビューを確認してください。", icon="✅")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"取得に失敗しました: {e}")
+                    st.error(f"取得・解析に失敗しました: {e}")
 
         collect_text = st.text_area(
             "netkeibaの結果ページ(複数レース分をまとめて貼り付けてもOK)",
