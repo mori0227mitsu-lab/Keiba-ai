@@ -19,13 +19,72 @@ USER_AGENT = (
 )
 
 
+# 出馬表・結果テーブルらしさを判定するためのキーワード
+_TABLE_HEADER_KEYWORDS = [
+    "枠", "馬番", "馬名", "性齢", "斤量", "騎手", "タイム", "着差",
+    "人気", "オッズ", "厩舎", "馬体重",
+]
+
+
+def _find_race_table(soup: BeautifulSoup):
+    """ページ内の<table>のうち、出馬表・結果テーブルらしいものを1つ選ぶ。
+
+    見出しキーワードが多く含まれる表ほど「それらしい」とみなす。
+    ページ内には過去の優勝馬一覧など紛らわしい表も他にあるため、
+    単純に最初の表を使うと誤爆するのでスコアリングして選ぶ。
+    """
+    tables = soup.find_all("table")
+    best_table, best_score = None, 0
+    for table in tables:
+        text = table.get_text()
+        score = sum(1 for kw in _TABLE_HEADER_KEYWORDS if kw in text)
+        # 出走頭数分のリンク(馬詳細ページへのリンク)が多いほど、それらしい表とみなす
+        score += min(len(table.find_all("a")), 20) / 4
+        if score > best_score:
+            best_table, best_score = table, score
+    return best_table
+
+
+def _table_to_tsv_lines(table) -> list:
+    """<table>を、1行=1レコードのタブ区切りテキストに変換する。
+
+    空セル(着差が「クビ」等で無い勝ち馬など)を詰めてしまうと、後続の列が
+    ズレて誤読の原因になるため、空セルも位置を保ったまま残す。
+    (行の中身が完全に空の場合だけ、その行自体を捨てる)
+    """
+    lines = []
+    for row in table.find_all("tr"):
+        cells = row.find_all(["td", "th"])
+        cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
+        if any(t != "" for t in cell_texts):
+            lines.append("\t".join(cell_texts))
+    return lines
+
+
 def fetch_netkeiba_text(url: str) -> str:
     """netkeibaのレースページ(出馬表・結果どちらも)をURLから取得し、
 
-    表の中身をタブ・改行区切りのテキストに変換して返す。
-    これまでの「コピペしたテキストをパースする」処理(parse_netkeiba_shutuba等)に
-    そのまま渡せる形式を目指す。取得や変換に失敗した場合は例外を投げる。
+    表の中身をタブ・改行区切りのテキストに変換して返す(確認・デバッグ用)。
+    実際のパースには fetch_and_parse_netkeiba_result() の方を使う。
     """
+    soup = _fetch_soup(url)
+    full_text = soup.get_text(separator="\n", strip=True)
+    header_lines = [
+        ln for ln in full_text.splitlines()
+        if ("発走" in ln and ("m" in ln or "M" in ln)) or ("回" in ln and "日目" in ln)
+    ]
+
+    race_table = _find_race_table(soup)
+    if race_table is None:
+        raise ValueError(
+            "出走馬の表が見つかりませんでした。ページの構造が想定と違う可能性があります。"
+        )
+    table_lines = _table_to_tsv_lines(race_table)
+
+    return "\n".join(header_lines + table_lines)
+
+
+def _fetch_soup(url: str) -> BeautifulSoup:
     try:
         resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
         resp.raise_for_status()
@@ -34,22 +93,194 @@ def fetch_netkeiba_text(url: str) -> str:
 
     resp.encoding = resp.apparent_encoding or "euc-jp"
     soup = BeautifulSoup(resp.text, "html.parser")
-
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
+    return soup
 
-    # メインコンテンツらしき部分(出馬表・結果の表を含むエリア)を探す。
-    # netkeibaのページ構造は変わることがあるため、複数の候補を順に試す。
-    candidates = soup.select(
-        "table, .RaceTable01, .Shutuba_Table, #contents, main, body"
-    )
-    target = candidates[0] if candidates else soup
 
-    text = target.get_text(separator="\t", strip=False)
-    # 連続する空白行を1行にまとめて読みやすくする
-    lines = [ln.rstrip() for ln in text.splitlines()]
-    lines = [ln for ln in lines if ln.strip() != ""]
-    return "\n".join(lines)
+# 結果テーブルの列見出しを判定するためのキーワード → CSV_COLSでの役割 の対応
+_COLUMN_ROLE_KEYWORDS = [
+    ("finish", ["着順", "着 順"]),
+    ("waku", ["枠"]),
+    ("horse_num", ["馬番", "馬 番"]),
+    ("name", ["馬名"]),
+    ("sex_age", ["性齢"]),
+    ("weight_carry", ["斤量"]),
+    ("jockey", ["騎手"]),
+    ("time", ["タイム"]),
+    ("margin", ["着差"]),
+    ("popularity", ["人気", "人 気"]),
+    ("odds", ["オッズ"]),
+    ("agari", ["後3F", "後3Ｆ"]),
+    ("corner", ["通過順", "コーナー"]),
+    ("trainer", ["厩舎"]),
+    ("weight", ["馬体重"]),
+]
+
+
+def _map_columns(header_cells: list) -> dict:
+    """ヘッダー行のセル文字列から、各列が何の役割かを判定してindexの辞書を作る。"""
+    role_to_idx = {}
+    used_idx = set()
+    for role, keywords in _COLUMN_ROLE_KEYWORDS:
+        for i, cell in enumerate(header_cells):
+            if i in used_idx:
+                continue
+            if any(kw in cell for kw in keywords):
+                role_to_idx[role] = i
+                used_idx.add(i)
+                break
+    return role_to_idx
+
+
+def _extract_header_info(soup: BeautifulSoup) -> dict:
+    """ページ全体のテキストから、開催場・距離・コース種別・馬場状態を抜き出す。"""
+    flat = soup.get_text(separator=" ", strip=True)
+    flat = re.sub(r"\s+", " ", flat)
+
+    info = {"venue": None, "distance": None, "track_type": None, "condition": None}
+
+    m = re.search(r"(芝|ダート|ダ)\s*(\d{3,4})\s*m", flat)
+    if m:
+        info["track_type"] = "芝" if m.group(1) == "芝" else "ダート"
+        info["distance"] = int(m.group(2))
+
+    m = re.search(r"馬場\s*:\s*(良|稍重|稍|重|不良|不)", flat)
+    if m:
+        info["condition"] = COND_FIX.get(m.group(1), m.group(1))
+
+    m = re.search(r"\d+回\s*([^\s\d回]{2,4})\s*\d+日目", flat)
+    if m:
+        info["venue"] = m.group(1)
+
+    return info
+
+
+def fetch_and_parse_netkeiba_result(url: str, race_id: int, race_date: str = "") -> pd.DataFrame:
+    """netkeibaの「結果」ページのURLから直接取得し、CSV_COLS形式のDataFrameを作る。
+
+    テキストのコピペを経由せず、取得したHTMLの表を直接読み取るので、
+    列のズレなどが起きにくい(はず)。
+    """
+    soup = _fetch_soup(url)
+    header_info = _extract_header_info(soup)
+    if not all([header_info["venue"], header_info["distance"], header_info["track_type"]]):
+        raise ValueError(
+            "レース条件(開催場・距離・コース種別)を読み取れませんでした。"
+            "ページの構造が想定と違う可能性があります。"
+        )
+
+    race_table = _find_race_table(soup)
+    if race_table is None:
+        raise ValueError("出走馬の表が見つかりませんでした。")
+
+    trs = race_table.find_all("tr")
+    if len(trs) < 2:
+        raise ValueError("出走馬の表の行数が想定より少ないです。")
+
+    header_cells = [c.get_text(strip=True) for c in trs[0].find_all(["td", "th"])]
+    role_to_idx = _map_columns(header_cells)
+    required_roles = ["horse_num", "name", "sex_age", "jockey"]
+    if not all(r in role_to_idx for r in required_roles):
+        raise ValueError("表の列構成を認識できませんでした(見出しの形式が想定と違う可能性があります)。")
+
+    venue = header_info["venue"]
+    condition = header_info["condition"] or "良"
+    track_type = header_info["track_type"]
+    distance = header_info["distance"]
+    straight = COURSE_STRAIGHT_LENGTH.get(venue, "普通")
+    race_class, class_level = detect_race_class(soup.get_text(separator=" ", strip=True))
+
+    rows_raw = []
+    for tr in trs[1:]:
+        cells = [c.get_text(separator=" ", strip=True) for c in tr.find_all(["td", "th"])]
+        if not any(c != "" for c in cells):
+            continue
+
+        def get(role, default=""):
+            idx = role_to_idx.get(role)
+            return cells[idx] if idx is not None and idx < len(cells) else default
+
+        name = get("name")
+        if not name:
+            continue
+
+        sex_age = get("sex_age")
+        sex_m = re.match(r"([牡牝セ])(\d+)", sex_age)
+        sex = sex_m.group(1) if sex_m else "牡"
+        age = int(sex_m.group(2)) if sex_m else 0
+
+        weight_m = re.match(r"(\d{2,3})\(([+-]?\d+)\)", get("weight").replace(" ", ""))
+        weight = int(weight_m.group(1)) if weight_m else 0
+        weight_diff = int(weight_m.group(2)) if weight_m else 0
+
+        corner_raw = get("corner")
+        corner_last = corner_raw.split("-")[-1] if corner_raw else ""
+        corner_pos = int(corner_last) if corner_last.isdigit() else None
+
+        finish_raw = get("finish")
+        finish = 99 if finish_raw in ("中止", "除外", "取消") else (int(finish_raw) if finish_raw.isdigit() else 99)
+
+        rows_raw.append({
+            "finish": finish,
+            "waku": int(get("waku") or 0),
+            "horse_num": int(get("horse_num") or 0),
+            "name": name,
+            "sex": sex,
+            "age": age,
+            "weight_carry": float(get("weight_carry") or 0),
+            "jockey": _clean(get("jockey")),
+            "time": get("time"),
+            "popularity": int(get("popularity") or 0),
+            "odds": float(get("odds") or 0) if get("odds") else 0.0,
+            "agari": float(get("agari")) if get("agari") else None,
+            "corner": corner_pos,
+            "trainer": _clean(get("trainer")),
+            "weight": weight,
+            "weight_diff": weight_diff,
+        })
+
+    if not rows_raw:
+        raise ValueError("出走馬の行を1件も読み取れませんでした。")
+
+    corners = [r["corner"] if r["corner"] is not None else 999 for r in rows_raw]
+    styles = _styles_from_corner(corners)
+
+    out_rows = []
+    for r, style, cpos in zip(rows_raw, styles, corners):
+        out_rows.append({
+            "race_id": race_id,
+            "race_date": race_date,
+            "venue": venue,
+            "distance": distance,
+            "track_type": track_type,
+            "condition": condition,
+            "straight_length": straight,
+            "day_bias": "フラット",
+            "race_class": race_class,
+            "class_level": class_level,
+            "horse_num": r["horse_num"],
+            "horse_name": r["name"],
+            "waku": r["waku"],
+            "sex": r["sex"],
+            "age": r["age"],
+            "jockey": r["jockey"],
+            "trainer": r["trainer"],
+            "running_style": style if style is not None else "不明",
+            "weight_carry": r["weight_carry"],
+            "horse_weight": r["weight"],
+            "weight_diff": r["weight_diff"],
+            "prev_rank": 0,
+            "rest_weeks": 0,
+            "popularity": r["popularity"],
+            "odds": r["odds"],
+            "finish_rank": r["finish"],
+            "time_sec": _time_to_sec(r["time"]),
+            "agari_3f": r["agari"],
+            "corner_pos": cpos if cpos != 999 else None,
+        })
+
+    return pd.DataFrame(out_rows)[CSV_COLS]
 
 HEADER_RE = re.compile(
     r"発走\s*/\s*(?P<track>芝|ダ)(?P<distance>\d+)m.*?/\s*馬場:(?P<condition>\S+)\n"
