@@ -596,28 +596,83 @@ def main():
         with st.expander("🔗 URLを貼るだけで取得する(実験的機能)"):
             st.caption(
                 "コピペの代わりに、netkeibaの結果ページのURLを貼って自動取得できます。"
-                "1回につき1レース分です。うまく取れない場合は上のコピペ方式を使ってください。"
+                "複数レース分まとめて取得したい場合は、1行に1URLずつ貼ってください。"
+                "うまく取れない場合は上のコピペ方式を使ってください。"
             )
-            result_url = st.text_input("結果ページのURL", key="result_url_input")
+            result_urls_text = st.text_area(
+                "結果ページのURL(1行に1つ)", height=100, key="result_urls_input",
+            )
             if st.button("URLから取得してプレビュー", key="result_url_fetch"):
-                try:
-                    with st.spinner("取得中..."):
+                urls = [u.strip() for u in result_urls_text.splitlines() if u.strip()]
+                if not urls:
+                    st.warning("URLを1つ以上入力してください。")
+                else:
+                    try:
+                        token = st.secrets["github_token"]
+                        repo = st.secrets["github_repo"]
+                        branch = st.secrets.get("github_branch", "main")
+                        existing_df_u, _ = fetch_csv(token, repo, branch, "data/dummy_races.csv")
+
                         if use_auto_id:
-                            token = st.secrets["github_token"]
-                            repo = st.secrets["github_repo"]
-                            branch = st.secrets.get("github_branch", "main")
-                            existing_df_u, _ = fetch_csv(token, repo, branch, "data/dummy_races.csv")
-                            start_id_u = (int(existing_df_u["race_id"].max()) + 1) if len(existing_df_u) else 9001
+                            next_id_u = (int(existing_df_u["race_id"].max()) + 1) if len(existing_df_u) else 9001
                         else:
-                            start_id_u = int(manual_start_id)
-                        url_preview_df = fetch_and_parse_netkeiba_result(
-                            result_url, race_id=start_id_u, race_date=str(collect_date),
+                            next_id_u = int(manual_start_id)
+
+                        all_dfs = []
+                        overwritten_list = []
+                        failed_urls = []
+                        progress = st.progress(0.0, text="取得中...")
+                        for i, url in enumerate(urls):
+                            progress.progress((i + 1) / len(urls), text=f"取得中... ({i + 1}/{len(urls)})")
+                            try:
+                                one_df = fetch_and_parse_netkeiba_result(
+                                    url, race_id=next_id_u, race_date=str(collect_date),
+                                )
+                            except Exception as e:
+                                failed_urls.append((url, str(e)))
+                                continue
+
+                            # 既存データ・今回すでに取得した分と重複していないか確認する
+                            combined_existing = pd.concat([existing_df_u] + all_dfs, ignore_index=True) if all_dfs else existing_df_u
+                            race_row_u = one_df.iloc[0]
+                            race_info_u = [{
+                                "venue": race_row_u["venue"], "distance": race_row_u["distance"],
+                                "track_type": race_row_u["track_type"], "race_date": race_row_u.get("race_date"),
+                                "horse_names": one_df["horse_name"].dropna().astype(str).tolist(),
+                            }]
+                            matches_u = find_existing_race_ids(combined_existing, race_info_u)
+                            if 0 in matches_u:
+                                one_df["race_id"] = matches_u[0]
+                                overwritten_list.append(matches_u[0])
+                            else:
+                                next_id_u += 1
+
+                            all_dfs.append(one_df)
+                        progress.empty()
+
+                        if not all_dfs:
+                            st.error("どのURLからも取得できませんでした。")
+                            for url, err in failed_urls:
+                                st.caption(f"・{url} → {err}")
+                        else:
+                            st.session_state.collect_preview = pd.concat(all_dfs, ignore_index=True)
+                            n_horses = sum(len(d) for d in all_dfs)
+                            msg = f"{len(all_dfs)}レース・{n_horses}頭分を取得しました。"
+                            if overwritten_list:
+                                msg += f" うち{len(overwritten_list)}レースは上書き対象です(race_id: {overwritten_list})。"
+                            st.toast(msg, icon="✅")
+                            if failed_urls:
+                                st.warning(f"{len(failed_urls)}件のURLは取得できませんでした。")
+                                for url, err in failed_urls:
+                                    st.caption(f"・{url} → {err}")
+                            st.rerun()
+                    except KeyError:
+                        st.error(
+                            "GitHubのトークンが設定されていないため、重複チェックができません。"
+                            "Streamlit CloudのSecretsにgithub_token / github_repoを設定してください。"
                         )
-                    st.session_state.collect_preview = url_preview_df
-                    st.toast(f"{len(url_preview_df)}頭分を取得しました。下のプレビューを確認してください。", icon="✅")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"取得・解析に失敗しました: {e}")
+                    except Exception as e:
+                        st.error(f"取得・解析に失敗しました: {e}")
 
         collect_text = st.text_area(
             "netkeibaの結果ページ(複数レース分をまとめて貼り付けてもOK)",
