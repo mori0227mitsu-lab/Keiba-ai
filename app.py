@@ -569,6 +569,10 @@ def main():
 
     if "collect_paste_version" not in st.session_state:
         st.session_state.collect_paste_version = 0
+    if "result_urls_version" not in st.session_state:
+        st.session_state.result_urls_version = 0
+    if "shutuba_url_version" not in st.session_state:
+        st.session_state.shutuba_url_version = 0
 
     with st.expander("📥 データを集める(結果ページを貼り付けて自動保存)", expanded=True):
         st.caption(
@@ -600,7 +604,8 @@ def main():
                 "うまく取れない場合は上のコピペ方式を使ってください。"
             )
             result_urls_text = st.text_area(
-                "結果ページのURL(1行に1つ)", height=100, key="result_urls_input",
+                "結果ページのURL(1行に1つ)", height=100,
+                key=f"result_urls_input_{st.session_state.result_urls_version}",
             )
             if st.button("URLから取得してプレビュー", key="result_url_fetch"):
                 urls = [u.strip() for u in result_urls_text.splitlines() if u.strip()]
@@ -665,6 +670,7 @@ def main():
                                 st.warning(f"{len(failed_urls)}件のURLは取得できませんでした。")
                                 for url, err in failed_urls:
                                     st.caption(f"・{url} → {err}")
+                            st.session_state.result_urls_version += 1
                             st.rerun()
                     except KeyError:
                         st.error(
@@ -944,13 +950,17 @@ def main():
                     "コピペの代わりに、netkeibaの出馬表ページのURLを貼って自動取得を試せます。"
                     "サイトの構造次第でうまく取れないこともあるので、その場合は上のコピペ方式を使ってください。"
                 )
-                shutuba_url = st.text_input("出馬表のURL", key="shutuba_url_input")
+                shutuba_url = st.text_input(
+                    "出馬表のURL",
+                    key=f"shutuba_url_input_{st.session_state.shutuba_url_version}",
+                )
                 if st.button("URLから取得", key="shutuba_url_fetch"):
                     try:
                         with st.spinner("取得中..."):
                             fetched_text = fetch_netkeiba_text(shutuba_url)
                         st.session_state.raw_paste_version += 1
                         st.session_state[f"raw_paste_{st.session_state.raw_paste_version}"] = fetched_text
+                        st.session_state.shutuba_url_version += 1
                         st.toast("取得しました。下の欄に反映しています。", icon="✅")
                         st.rerun()
                     except Exception as e:
