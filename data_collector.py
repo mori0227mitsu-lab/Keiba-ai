@@ -134,11 +134,17 @@ def _map_columns(header_cells: list) -> dict:
 
 
 def _extract_header_info(soup: BeautifulSoup) -> dict:
-    """ページ全体のテキストから、開催場・距離・コース種別・馬場状態を抜き出す。"""
+    """ページ全体のテキストから、開催場・距離・コース種別・馬場状態を抜き出す。
+
+    race_class判定用に、レース条件が書かれている周辺だけの短いテキスト
+    (class_context)も一緒に返す。ページ全体をレース格判定に使うと、
+    関係ない場所にある文字列(例えば単独の「L」)に誤反応する恐れがあるため、
+    範囲を絞っておく。
+    """
     flat = soup.get_text(separator=" ", strip=True)
     flat = re.sub(r"\s+", " ", flat)
 
-    info = {"venue": None, "distance": None, "track_type": None, "condition": None}
+    info = {"venue": None, "distance": None, "track_type": None, "condition": None, "class_context": ""}
 
     m = re.search(r"(芝|ダート|ダ)\s*(\d{3,4})\s*m", flat)
     if m:
@@ -149,9 +155,12 @@ def _extract_header_info(soup: BeautifulSoup) -> dict:
     if m:
         info["condition"] = COND_FIX.get(m.group(1), m.group(1))
 
-    m = re.search(r"\d+回\s*([^\s\d回]{2,4})\s*\d+日目", flat)
-    if m:
-        info["venue"] = m.group(1)
+    m2 = re.search(r"\d+回\s*([^\s\d回]{2,4})\s*\d+日目", flat)
+    if m2:
+        info["venue"] = m2.group(1)
+        # 「n回 会場 n日目」の直後(サラ系〜新馬/オープン/(G3)等が続く部分)だけを
+        # レース格判定に使う。ページ冒頭(レース名にグレードが付くことがある)も少し含める。
+        info["class_context"] = flat[:200] + " " + flat[m2.end():m2.end() + 150]
 
     return info
 
@@ -189,7 +198,7 @@ def fetch_and_parse_netkeiba_result(url: str, race_id: int, race_date: str = "")
     track_type = header_info["track_type"]
     distance = header_info["distance"]
     straight = COURSE_STRAIGHT_LENGTH.get(venue, "普通")
-    race_class, class_level = detect_race_class(soup.get_text(separator=" ", strip=True))
+    race_class, class_level = detect_race_class(header_info.get("class_context", ""))
 
     rows_raw = []
     for tr in trs[1:]:
