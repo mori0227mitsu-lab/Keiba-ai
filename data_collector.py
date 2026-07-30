@@ -67,7 +67,7 @@ def fetch_netkeiba_text(url: str) -> str:
     表の中身をタブ・改行区切りのテキストに変換して返す(確認・デバッグ用)。
     実際のパースには fetch_and_parse_netkeiba_result() の方を使う。
     """
-    soup = _fetch_soup(url)
+    soup = _fetch_soup(url, kind="shutuba")
     full_text = soup.get_text(separator="\n", strip=True)
     header_lines = [
         ln for ln in full_text.splitlines()
@@ -84,7 +84,23 @@ def fetch_netkeiba_text(url: str) -> str:
     return "\n".join(header_lines + table_lines)
 
 
-def _fetch_soup(url: str) -> BeautifulSoup:
+def normalize_netkeiba_url(url: str, kind: str = "result") -> str:
+    """スマホの「リンクをコピー」機能などで作られる様々な形式のnetkeiba URLから、
+    race_idだけを取り出し、確実に読み込める形式のURLに組み直す。
+
+    kind="result" なら結果ページ、kind="shutuba" なら出馬表ページのURLにする。
+    """
+    m = re.search(r"race_id=(\d+)", url)
+    if not m:
+        # race_idが見つからない場合は、元のURLをそのまま使う(万one形式が違うだけの場合に備えて)
+        return url
+    race_id = m.group(1)
+    page = "shutuba.html" if kind == "shutuba" else "result.html"
+    return f"https://race.sp.netkeiba.com/race/{page}?race_id={race_id}"
+
+
+def _fetch_soup(url: str, kind: str = "result") -> BeautifulSoup:
+    url = normalize_netkeiba_url(url, kind=kind)
     try:
         resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
         resp.raise_for_status()
