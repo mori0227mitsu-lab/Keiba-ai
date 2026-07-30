@@ -85,18 +85,23 @@ def fetch_netkeiba_text(url: str) -> str:
 
 
 def normalize_netkeiba_url(url: str, kind: str = "result") -> str:
-    """スマホの「リンクをコピー」機能などで作られる様々な形式のnetkeiba URLから、
-    race_idだけを取り出し、確実に読み込める形式のURLに組み直す。
+    """様々な形式のnetkeiba URLから race_id を取り出し、
+    PC版(race.netkeiba.com)の標準URLに組み直す。
+
+    スマホ版(race.sp.netkeiba.com)はPC版とページのレイアウトが大きく異なり、
+    レース条件が「12R 3歳以上1勝クラス16:30 ダ1150m(右) 14頭 晴 良」のような
+    1行にまとまった形式になっていて解析が難しい。そのため、スマホからコピーした
+    URLでも必ずPC版に変換して取得する。
 
     kind="result" なら結果ページ、kind="shutuba" なら出馬表ページのURLにする。
     """
     m = re.search(r"race_id=(\d+)", url)
     if not m:
-        # race_idが見つからない場合は、元のURLをそのまま使う(万one形式が違うだけの場合に備えて)
+        # race_idが見つからない場合は、元のURLをそのまま使う
         return url
     race_id = m.group(1)
     page = "shutuba.html" if kind == "shutuba" else "result.html"
-    return f"https://race.sp.netkeiba.com/race/{page}?race_id={race_id}"
+    return f"https://race.netkeiba.com/race/{page}?race_id={race_id}"
 
 
 def _fetch_soup(url: str, kind: str = "result") -> BeautifulSoup:
