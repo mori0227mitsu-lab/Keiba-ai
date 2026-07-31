@@ -309,6 +309,33 @@ def lookup_horse_history() -> pd.DataFrame:
     return latest, hist
 
 
+def _typical_running_style(name_hist: pd.DataFrame):
+    """ある馬の過去走の脚質のうち、一番多く見せている脚質(最頻値)を返す。
+
+    同数で並んだ場合は、直近の走りにある方を優先する
+    (chronologicalに新しい順に見て最初に出てきた方を採用)。
+    データが無ければNoneを返す。
+    """
+    if name_hist.empty or "running_style" not in name_hist.columns:
+        return None
+    styles = name_hist["running_style"].dropna()
+    styles = styles[styles.isin(RUNNING_STYLES)]
+    if styles.empty:
+        return None
+    counts = styles.value_counts()
+    top_count = counts.max()
+    top_styles = set(counts[counts == top_count].index)
+    if len(top_styles) == 1:
+        return top_styles.pop()
+
+    # 同数で並んだ場合は、時系列で新しい方から見て最初に登場した脚質を採用する
+    ordered = add_chronological_sort_key(name_hist).sort_values("_chron_key", ascending=False)
+    for style in ordered["running_style"]:
+        if style in top_styles:
+            return style
+    return top_styles.pop()
+
+
 def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current_hill: str, current_distance=None):
     """ある馬の全過去成績から、今回のレース条件(右左回り・坂・距離区分)との
     得意不得意を判定する。
@@ -395,10 +422,25 @@ def apply_horse_history(
             df.at[i, "prev_rank"] = int(h["finish_rank"])
             matched += 1
 
-        # この馬の全過去成績から、今回のコース条件・距離との得意不得意を判定
-        turn_apt, hill_apt, dist_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        # この馬の全過去成績(複数走あれば全部)を先に取得しておく
+        name_hist = pd.DataFrame()
         if not full_history.empty and "horse_name" in full_history.columns:
             name_hist = full_history[full_history["horse_name"] == actual_key]
+
+        # 出馬表には脚質情報が無いため既定値(差し)になっているが、
+        # 過去走の脚質が分かるならそちらを引き継いだ方が精度が上がる。
+        # 複数走あれば「一番多く見せている脚質」を採用する(1走だけだと展開に
+        # 左右されたブレの可能性があるため。逃げ→逃げ→差し のような馬なら
+        # 「逃げ」を本来の脚質とみなす、という考え方)。
+        typical_style = _typical_running_style(name_hist) if not name_hist.empty else None
+        if typical_style is None:
+            typical_style = h.get("running_style")
+        if pd.notna(typical_style) and typical_style in RUNNING_STYLES and "running_style" in df.columns:
+            df.at[i, "running_style"] = typical_style
+
+        # この馬の全過去成績から、今回のコース条件・距離との得意不得意を判定
+        turn_apt, hill_apt, dist_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        if not name_hist.empty:
             turn_apt, hill_apt, dist_apt = compute_current_aptitude(
                 name_hist, current_turn, current_hill, current_distance
             )
