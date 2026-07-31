@@ -25,6 +25,8 @@ from model.train_model import (
     STRETCH_OUT_NOTE_NONE, compute_stretch_out_note,
     quinella_proba, wide_proba, trio_proba, trifecta_proba, compute_expected_values,
     distance_category, compute_horse_distance_aptitude,
+    PACE_NOTE_LEADER_GRIT, PACE_NOTE_LEADER_STRONG_RACE,
+    estimate_race_pace, pace_style_fit, RACE_PACE_MIDDLE,
 )
 from data_collector import (
     parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df,
@@ -255,10 +257,15 @@ def generate_scouting_memos(max_n: int = 5) -> list:
         lines.append(f"タイムは{time_str}、上がり3Fは{agari}でした。")
 
         note_texts = []
-        if row.get("pace_note") == "強い勝ち方(先行して上がり負けでも勝利)":
+        if row.get("pace_note") == PACE_NOTE_LEADER_GRIT:
             note_texts.append(
-                "先行して上がりは平凡だったにも関わらず好走しています。展開関係なく地力で押し切れる、"
+                "先行して上がりは平凡だったにも関わらず勝ち切っています。展開関係なく地力で押し切れる、"
                 "素質を感じさせる内容です。"
+            )
+        elif row.get("pace_note") == PACE_NOTE_LEADER_STRONG_RACE:
+            note_texts.append(
+                "先行して上がりは平凡だったにも関わらず2-3着に好走しています。勝ち切れてはいませんが、"
+                "展開関係なく粘れる強さを感じさせる内容です。"
             )
         elif row.get("pace_note") == "展開不利(上がり1位なのに掲示板外)":
             note_texts.append(
@@ -1150,6 +1157,11 @@ def main():
         df["class_level"] = class_level
         df["gate_sensitive"] = "枠影響大" if is_gate_sensitive_course(venue, distance, track_type) else "通常"
 
+        # 出走メンバーの脚質構成から、このレースの想定ペースを判定する
+        predicted_pace = estimate_race_pace(df["running_style"]) if "running_style" in df.columns else RACE_PACE_MIDDLE
+        df["race_pace"] = predicted_pace
+        df["pace_fit"] = df["running_style"].apply(lambda s: pace_style_fit(predicted_pace, s)) if "running_style" in df.columns else "五分"
+
         # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順・展開評価)をマージ
         prev_extra = st.session_state.get("prev_extra", {})
         for col in ("prev_time_sec", "prev_agari_3f", "prev_corner_pos", "prev_class_level", "prev_race_time_score"):
@@ -1182,6 +1194,8 @@ def main():
 
         display_cols = ["horse_num", "horse_name", "waku", "jockey", "popularity", "odds"]
         result = edited[[c for c in display_cols if c in edited.columns]].copy()
+        if "running_style" in df.columns:
+            result["脚質"] = df["running_style"].values
         result["複勝確率(%)"] = (proba * 100).round(1)
         result["勝率(%)"] = (win_proba * 100).round(1)
 
@@ -1206,10 +1220,20 @@ def main():
         # ここでボタンブロック内のままにすると、下の買い目セレクトボックスを
         # 操作するたびに画面が再実行されて予測結果ごと消えてしまうため。
         st.session_state.prediction_result = result
+        st.session_state.prediction_pace = predicted_pace
 
     if "prediction_result" in st.session_state:
         result = st.session_state.prediction_result
         section_head("3", "予測結果")
+
+        if "prediction_pace" in st.session_state:
+            pace = st.session_state.prediction_pace
+            pace_hint = {
+                "スロー": "逃げ・先行が有利になりやすい想定です",
+                "ミドル": "特定の脚質に大きく偏らない想定です",
+                "ハイ": "差し・追い込みが届きやすい想定です",
+            }.get(pace, "")
+            st.caption(f"🏇 出走メンバーの脚質構成からの想定ペース: **{pace}**({pace_hint})")
 
         # 上位ピックアップを見やすく表示
         picks = result[result["印"] != ""]
