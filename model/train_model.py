@@ -21,19 +21,19 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
 
-from course_info import COURSE_HILL, COURSE_TURN
+from course_info import COURSE_HILL, COURSE_TURN, is_gate_sensitive_course
 
 CATEGORICAL_COLS = [
     "venue", "track_type", "condition", "sex", "jockey", "running_style",
     "day_bias", "straight_length", "trainer", "prev_pace_note",
     "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
     "race_class", "prev_field_strength_note", "prev_stretch_out_note",
-    "horse_distance_aptitude",
+    "horse_distance_aptitude", "gate_sensitive",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる/固定知識)
     "venue", "distance", "track_type", "condition", "straight_length", "day_bias",
-    "turn_direction", "hill", "race_class", "class_level",
+    "turn_direction", "hill", "race_class", "class_level", "gate_sensitive",
     # 馬の基本情報(その場で分かる)
     "waku", "age", "sex", "jockey", "trainer", "running_style",
     "weight_carry", "horse_weight", "weight_diff", "popularity",
@@ -490,6 +490,10 @@ def load_data(path: str) -> pd.DataFrame:
     df = fill_prev_from_history(df)
     df = compute_horse_course_aptitude(df)
     df = compute_horse_distance_aptitude(df)
+    df["gate_sensitive"] = df.apply(
+        lambda r: "枠影響大" if is_gate_sensitive_course(r.get("venue"), r.get("distance"), r.get("track_type")) else "通常",
+        axis=1,
+    )
     df[TARGET_COL] = (df["finish_rank"] <= 3).astype(int)
     return df
 
@@ -518,6 +522,14 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         df["race_class"] = "未勝利"
     if "turn_direction" not in df.columns:
         df["turn_direction"] = df["venue"].map(COURSE_TURN).fillna("右") if "venue" in df.columns else "右"
+    if "gate_sensitive" not in df.columns:
+        if {"venue", "distance", "track_type"}.issubset(df.columns):
+            df["gate_sensitive"] = df.apply(
+                lambda r: "枠影響大" if is_gate_sensitive_course(r.get("venue"), r.get("distance"), r.get("track_type")) else "通常",
+                axis=1,
+            )
+        else:
+            df["gate_sensitive"] = "通常"
     if "hill" not in df.columns:
         df["hill"] = df["venue"].map(COURSE_HILL).fillna("坂なし") if "venue" in df.columns else "坂なし"
     if "horse_turn_aptitude" not in df.columns:
