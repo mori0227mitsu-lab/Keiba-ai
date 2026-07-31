@@ -28,12 +28,13 @@ CATEGORICAL_COLS = [
     "day_bias", "straight_length", "trainer", "prev_pace_note",
     "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
     "race_class", "prev_field_strength_note", "prev_stretch_out_note",
-    "horse_distance_aptitude", "gate_sensitive",
+    "horse_distance_aptitude", "gate_sensitive", "race_pace", "pace_fit",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる/固定知識)
     "venue", "distance", "track_type", "condition", "straight_length", "day_bias",
     "turn_direction", "hill", "race_class", "class_level", "gate_sensitive",
+    "race_pace", "pace_fit",
     # 馬の基本情報(その場で分かる)
     "waku", "age", "sex", "jockey", "trainer", "running_style",
     "weight_carry", "horse_weight", "weight_diff", "popularity",
@@ -65,7 +66,9 @@ RAW_REQUIRED_COLS = [
 
 PACE_NOTE_NONE = "特になし"
 PACE_NOTE_LEADER_GRIT = "強い勝ち方(先行して上がり負けでも勝利)"
+PACE_NOTE_LEADER_STRONG_RACE = "強い競馬(先行して上がり負けでも僅差の好走)"
 PACE_NOTE_CLOSER_UNLUCKY = "展開不利(上がり1位なのに掲示板外)"
+PACE_NOTE_CLOSE_MARGIN = 1.0  # 4・5着でも「僅差」とみなす、3着とのタイム差の上限(秒)
 
 FIELD_NOTE_NONE = "特になし"
 FIELD_NOTE_STRONG = "高評価(先着馬が後に好走)"
@@ -256,6 +259,64 @@ def compute_horse_course_aptitude(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+RACE_PACE_SLOW = "スロー"
+RACE_PACE_MIDDLE = "ミドル"
+RACE_PACE_HIGH = "ハイ"
+
+
+def estimate_race_pace(running_styles) -> str:
+    """出走馬の脚質構成から、そのレースの想定ペースを大まかに割り出す。
+
+    考え方(簡易版):
+    - 「逃げ」馬が0頭 → 誰も引っ張らないので基本スロー
+    - 「逃げ」馬が1頭だけで、「先行」も少なければ、その馬の独走になりやすくスロー
+    - 「逃げ」馬が2頭以上、または「逃げ+先行」が頭数の半分以上を占める → ハイペースになりやすい
+    - それ以外はミドル
+
+    厳密な計算式ではなく、あくまで目安。実際のペースは枠順・騎手の意図・展開の綾など
+    様々な要因で変わるため、参考程度に見てほしい。
+    """
+    styles = [s for s in running_styles if pd.notna(s)]
+    n = len(styles)
+    if n == 0:
+        return RACE_PACE_MIDDLE
+
+    n_nige = sum(1 for s in styles if s == "逃げ")
+    n_leader = sum(1 for s in styles if s in ("逃げ", "先行"))
+
+    if n_nige >= 2 or (n > 0 and n_leader / n >= 0.5 and n_leader >= 3):
+        return RACE_PACE_HIGH
+    if n_nige == 0:
+        return RACE_PACE_SLOW
+    if n_nige == 1 and n_leader == 1:
+        # 逃げ馬が1頭だけで、競り合う先行馬が全くいない
+        # → その馬の独走になりやすく、スローペースが濃厚
+        return RACE_PACE_SLOW
+    return RACE_PACE_MIDDLE
+
+
+def pace_style_fit(race_pace: str, running_style: str) -> str:
+    """想定ペースと、その馬自身の脚質の相性を判定する。
+
+    - スローペースは、逃げ・先行が有利(前が止まらないため)
+    - ハイペースは、差し・追い込みが届きやすい(前が総崩れしやすいため)
+    - ミドルペース、または脚質不明の場合は「五分」とする
+    """
+    if pd.isna(race_pace) or pd.isna(running_style):
+        return "五分"
+    is_leader = running_style in ("逃げ", "先行")
+    is_closer = running_style in ("差し", "追い込み")
+    if race_pace == RACE_PACE_SLOW and is_leader:
+        return "有利"
+    if race_pace == RACE_PACE_HIGH and is_closer:
+        return "有利"
+    if race_pace == RACE_PACE_SLOW and is_closer:
+        return "不利"
+    if race_pace == RACE_PACE_HIGH and is_leader:
+        return "不利"
+    return "五分"
+
+
 def distance_category(distance) -> str:
     """距離を「短距離/マイル/中距離/長距離」の4区分に分類する。"""
     try:
@@ -338,9 +399,28 @@ def compute_pace_note(df: pd.DataFrame) -> pd.DataFrame:
         tags = pd.Series(PACE_NOTE_NONE, index=g.index)
         is_leader = g["running_style"].isin(["逃げ", "先行"])
         is_closer = g["running_style"].isin(["差し", "追い込み"])
+        is_win = g["finish_rank"] == 1
+        is_2nd_3rd = g["finish_rank"].isin([2, 3])
         top3 = g["finish_rank"] <= 3
         below_avg_agari = agari_rank > (n / 2)
-        tags[is_leader & top3 & below_avg_agari] = PACE_NOTE_LEADER_GRIT
+
+        # 4・5着でも、3着とのタイム差が僅差(PACE_NOTE_CLOSE_MARGIN秒以内)なら
+        # 実質的に上位争いをしていたとみなし、「強い競馬」に含める
+        # (掲示板を1つ2つ外しただけの僅差なら、次走の期待値としては
+        # 3着と大差ないはず、という考え方)
+        is_4th_5th = g["finish_rank"].isin([4, 5])
+        third_place_time = g.loc[g["finish_rank"] == 3, "time_sec"]
+        if len(third_place_time) and "time_sec" in g.columns:
+            time_gap = g["time_sec"] - third_place_time.iloc[0]
+            close_to_board = time_gap.notna() & (time_gap <= PACE_NOTE_CLOSE_MARGIN)
+        else:
+            close_to_board = pd.Series(False, index=g.index)
+
+        # 「強い勝ち方」は1着のみ。2・3着(・僅差の4・5着)は「強い競馬」という
+        # 別ラベルにする(勝ってはいないので「強い勝ち方」と呼ぶのは不正確なため)
+        tags[is_leader & is_win & below_avg_agari] = PACE_NOTE_LEADER_GRIT
+        tags[is_leader & is_2nd_3rd & below_avg_agari] = PACE_NOTE_LEADER_STRONG_RACE
+        tags[is_leader & is_4th_5th & close_to_board & below_avg_agari] = PACE_NOTE_LEADER_STRONG_RACE
         tags[is_closer & (~top3) & (agari_rank == 1)] = PACE_NOTE_CLOSER_UNLUCKY
         return tags
 
@@ -494,6 +574,14 @@ def load_data(path: str) -> pd.DataFrame:
         lambda r: "枠影響大" if is_gate_sensitive_course(r.get("venue"), r.get("distance"), r.get("track_type")) else "通常",
         axis=1,
     )
+    # レースごとの脚質構成から想定ペースを判定し、各馬自身の脚質との相性も付与する
+    if "race_id" in df.columns and "running_style" in df.columns:
+        race_pace_map = df.groupby("race_id")["running_style"].apply(estimate_race_pace)
+        df["race_pace"] = df["race_id"].map(race_pace_map)
+        df["pace_fit"] = df.apply(lambda r: pace_style_fit(r.get("race_pace"), r.get("running_style")), axis=1)
+    else:
+        df["race_pace"] = RACE_PACE_MIDDLE
+        df["pace_fit"] = "五分"
     df[TARGET_COL] = (df["finish_rank"] <= 3).astype(int)
     return df
 
@@ -530,6 +618,14 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
             )
         else:
             df["gate_sensitive"] = "通常"
+    if "race_pace" not in df.columns or "pace_fit" not in df.columns:
+        if "race_id" in df.columns and "running_style" in df.columns:
+            race_pace_map = df.groupby("race_id")["running_style"].apply(estimate_race_pace)
+            df["race_pace"] = df["race_id"].map(race_pace_map)
+            df["pace_fit"] = df.apply(lambda r: pace_style_fit(r.get("race_pace"), r.get("running_style")), axis=1)
+        else:
+            df["race_pace"] = RACE_PACE_MIDDLE
+            df["pace_fit"] = "五分"
     if "hill" not in df.columns:
         df["hill"] = df["venue"].map(COURSE_HILL).fillna("坂なし") if "venue" in df.columns else "坂なし"
     if "horse_turn_aptitude" not in df.columns:
