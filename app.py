@@ -1207,15 +1207,19 @@ def main():
             result["脚質"] = df["running_style"].values
         result["複勝確率(%)"] = (proba * 100).round(1)
         result["勝率(%)"] = (win_proba * 100).round(1)
-        # 単勝期待値(勝率×オッズ)。印は複勝確率の高さではなく、この期待値の高さで決める
-        # (「勝つ確率のわりにオッズが美味しいか」を重視する考え方)
+        # 単勝期待値(勝率×オッズ)。参考表示として残す。
         if "odds" in result.columns:
             result["単勝期待値"] = (win_proba * result["odds"].fillna(0)).round(2)
         else:
             result["単勝期待値"] = 0.0
 
-        # 単勝期待値が高い順に並べ、上位に印をつける
-        result = result.sort_values("単勝期待値", ascending=False).reset_index(drop=True)
+        # 印は「複勝確率×単勝期待値」が高い順に決める。
+        # 単勝期待値だけで決めると、勝率の推定が不安定になりがちな極端な人気薄
+        # (オッズが高いほど、確率のわずかな見積もり誤差が期待値を大きく揺らす)に
+        # 偏りやすいため、複勝確率(=データがより安定している指標)を掛け合わせて
+        # 「確率的な裏付けが十分にある期待値」を重視するようにしている。
+        result["総合スコア"] = (proba * result["単勝期待値"]).round(3)
+        result = result.sort_values("総合スコア", ascending=False).reset_index(drop=True)
         result.insert(0, "印", assign_marks(len(result)))
 
         # AIの評価順位と人気のズレから「妙味」を判定する
