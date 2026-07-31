@@ -1125,6 +1125,10 @@ def main():
         win_proba_raw = bundle["win_model"].predict_proba(X)[:, 1]
         win_proba_sum = win_proba_raw.sum()
         win_proba = win_proba_raw / win_proba_sum if win_proba_sum > 0 else win_proba_raw
+        # 「1着になる確率」が「3着以内に入る確率」を超えることは理屈上あり得ない
+        # (複勝モデルと勝率モデルは別々に学習しているため、まれに矛盾することがある)
+        # ので、勝率は複勝確率を超えないように補正する。
+        win_proba = pd.Series(win_proba).clip(upper=proba).values
 
         display_cols = ["horse_num", "horse_name", "waku", "jockey", "popularity", "odds"]
         result = edited[[c for c in display_cols if c in edited.columns]].copy()
