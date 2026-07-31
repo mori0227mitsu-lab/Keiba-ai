@@ -40,6 +40,7 @@ from course_info import (
     DAY_BIAS_OPTIONS,
     RUNNING_STYLES,
     VENUES,
+    is_gate_sensitive_course,
 )
 
 FEATURE_HASH = hashlib.md5(",".join(FEATURE_COLS).encode()).hexdigest()[:8]
@@ -967,6 +968,12 @@ def main():
         f"📏 {venue}: 直線{straight_length} / {turn_direction}回り / {hill}"
         "(固定情報として自動反映されます)"
     )
+    if is_gate_sensitive_course(venue, distance, track_type):
+        st.info(
+            "⚠️ このコースは、他コースより枠番(内枠/外枠)の有利不利が特に強く出ることで"
+            "知られています。AIの判断材料にも反映していますが、当日の馬場傾向(内有利/外有利)も"
+            "できるだけ正確に選んでください。"
+        )
 
     section_head("2", "出走馬の情報")
 
@@ -1141,6 +1148,7 @@ def main():
         df["hill"] = hill
         df["race_class"] = race_class
         df["class_level"] = class_level
+        df["gate_sensitive"] = "枠影響大" if is_gate_sensitive_course(venue, distance, track_type) else "通常"
 
         # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順・展開評価)をマージ
         prev_extra = st.session_state.get("prev_extra", {})
