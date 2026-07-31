@@ -982,6 +982,15 @@ def main():
             "できるだけ正確に選んでください。"
         )
 
+    ignore_pace = st.checkbox(
+        "脚質不問モードにする(データが少ない馬齢戦・クラス向け)",
+        help=(
+            "2歳新馬戦以外など、まだ馬ごとのデータが少ない条件では、脚質の自動推定(逃げ/先行/差し/追い込み)が"
+            "あまり当てにならないことがあります。チェックすると、想定ペース・ペース相性の判定をニュートラルにして、"
+            "脚質の推定ミスが予測に影響しにくくなります。"
+        ),
+    )
+
     section_head("2", "出走馬の情報")
 
     if "horse_df" not in st.session_state:
@@ -1158,9 +1167,15 @@ def main():
         df["gate_sensitive"] = "枠影響大" if is_gate_sensitive_course(venue, distance, track_type) else "通常"
 
         # 出走メンバーの脚質構成から、このレースの想定ペースを判定する
-        predicted_pace = estimate_race_pace(df["running_style"]) if "running_style" in df.columns else RACE_PACE_MIDDLE
-        df["race_pace"] = predicted_pace
-        df["pace_fit"] = df["running_style"].apply(lambda s: pace_style_fit(predicted_pace, s)) if "running_style" in df.columns else "五分"
+        # (「脚質不問モード」の場合は、脚質の推定精度が低い前提で、ペース判定をニュートラルにする)
+        if ignore_pace:
+            predicted_pace = RACE_PACE_MIDDLE
+            df["race_pace"] = RACE_PACE_MIDDLE
+            df["pace_fit"] = "五分"
+        else:
+            predicted_pace = estimate_race_pace(df["running_style"]) if "running_style" in df.columns else RACE_PACE_MIDDLE
+            df["race_pace"] = predicted_pace
+            df["pace_fit"] = df["running_style"].apply(lambda s: pace_style_fit(predicted_pace, s)) if "running_style" in df.columns else "五分"
 
         # 「馬名から前走成績を自動入力」で取得した裏データ(タイム・上がり3F・通過順・展開評価)をマージ
         prev_extra = st.session_state.get("prev_extra", {})
@@ -1221,19 +1236,23 @@ def main():
         # 操作するたびに画面が再実行されて予測結果ごと消えてしまうため。
         st.session_state.prediction_result = result
         st.session_state.prediction_pace = predicted_pace
+        st.session_state.prediction_ignore_pace = ignore_pace
 
     if "prediction_result" in st.session_state:
         result = st.session_state.prediction_result
         section_head("3", "予測結果")
 
         if "prediction_pace" in st.session_state:
-            pace = st.session_state.prediction_pace
-            pace_hint = {
-                "スロー": "逃げ・先行が有利になりやすい想定です",
-                "ミドル": "特定の脚質に大きく偏らない想定です",
-                "ハイ": "差し・追い込みが届きやすい想定です",
-            }.get(pace, "")
-            st.caption(f"🏇 出走メンバーの脚質構成からの想定ペース: **{pace}**({pace_hint})")
+            if st.session_state.get("prediction_ignore_pace"):
+                st.caption("🏇 脚質不問モードのため、ペース判定はニュートラル(五分)にしています。")
+            else:
+                pace = st.session_state.prediction_pace
+                pace_hint = {
+                    "スロー": "逃げ・先行が有利になりやすい想定です",
+                    "ミドル": "特定の脚質に大きく偏らない想定です",
+                    "ハイ": "差し・追い込みが届きやすい想定です",
+                }.get(pace, "")
+                st.caption(f"🏇 出走メンバーの脚質構成からの想定ペース: **{pace}**({pace_hint})")
 
         # 上位ピックアップを見やすく表示
         picks = result[result["印"] != ""]
