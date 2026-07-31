@@ -27,6 +27,7 @@ from model.train_model import (
     distance_category, compute_horse_distance_aptitude,
     PACE_NOTE_LEADER_GRIT, PACE_NOTE_LEADER_STRONG_RACE,
     estimate_race_pace, pace_style_fit, RACE_PACE_MIDDLE,
+    derive_probas,
 )
 from data_collector import (
     parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df,
@@ -1195,17 +1196,10 @@ def main():
                         df.at[i, col] = val
 
         X, _ = build_features(df, encoders=bundle["encoders"])
-        proba = bundle["model"].predict_proba(X)[:, 1]
-
-        # 勝率(1着になる確率)も計算し、レース全体で合計1になるよう正規化する
-        # (単勝オッズが無い馬券種の期待値計算に使う)
-        win_proba_raw = bundle["win_model"].predict_proba(X)[:, 1]
-        win_proba_sum = win_proba_raw.sum()
-        win_proba = win_proba_raw / win_proba_sum if win_proba_sum > 0 else win_proba_raw
-        # 「1着になる確率」が「3着以内に入る確率」を超えることは理屈上あり得ない
-        # (複勝モデルと勝率モデルは別々に学習しているため、まれに矛盾することがある)
-        # ので、勝率は複勝確率を超えないように補正する。
-        win_proba = pd.Series(win_proba).clip(upper=proba).values
+        # 複勝率・勝率は1つのモデル(1着/2・3着/圏外の3クラス)から導く。
+        # 複勝率 = P(1着) + P(2・3着) という足し算の構造になっているため、
+        # 「勝率が複勝率を上回る」という矛盾は起きようがない。
+        proba, win_proba = derive_probas(bundle["model"], X)
 
         display_cols = ["horse_num", "horse_name", "waku", "jockey", "popularity", "odds"]
         result = edited[[c for c in display_cols if c in edited.columns]].copy()
@@ -1213,9 +1207,15 @@ def main():
             result["脚質"] = df["running_style"].values
         result["複勝確率(%)"] = (proba * 100).round(1)
         result["勝率(%)"] = (win_proba * 100).round(1)
+        # 単勝期待値(勝率×オッズ)。印は複勝確率の高さではなく、この期待値の高さで決める
+        # (「勝つ確率のわりにオッズが美味しいか」を重視する考え方)
+        if "odds" in result.columns:
+            result["単勝期待値"] = (win_proba * result["odds"].fillna(0)).round(2)
+        else:
+            result["単勝期待値"] = 0.0
 
-        # AIの評価が高い順に並べ、上位に印をつける
-        result = result.sort_values("複勝確率(%)", ascending=False).reset_index(drop=True)
+        # 単勝期待値が高い順に並べ、上位に印をつける
+        result = result.sort_values("単勝期待値", ascending=False).reset_index(drop=True)
         result.insert(0, "印", assign_marks(len(result)))
 
         # AIの評価順位と人気のズレから「妙味」を判定する
