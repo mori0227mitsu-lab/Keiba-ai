@@ -35,6 +35,24 @@ COURSE_HILL = {
 # その日の馬場傾向(アプリ上でレースごとに手動選択する想定)
 DAY_BIAS_OPTIONS = ["フラット", "内有利", "外有利", "先行有利", "差し有利"]
 
+# 枠番(内枠/外枠)の有利不利が、他のコースより特に強く出ることで知られる
+# (venue, distance, track_type) の組み合わせ。
+# 代表例: 新潟芝1000m(直線コース、JRAで唯一カーブが無い)は、
+# 枠番による有利不利が非常に大きいことで有名。
+GATE_SENSITIVE_COURSES = {
+    ("新潟", 1000, "芝"),
+}
+
+
+def is_gate_sensitive_course(venue: str, distance, track_type: str) -> bool:
+    """このレース条件が「枠番の影響が特に強いコース」に該当するかどうかを返す。"""
+    try:
+        distance = int(distance)
+    except (TypeError, ValueError):
+        return False
+    return (venue, distance, track_type) in GATE_SENSITIVE_COURSES
+
+
 # 競馬場ごとに実際に開催される距離(芝/ダート別)。
 # 参考: JRA公式サイト、各競馬場のコース紹介ページ
 COURSE_DISTANCES = {
