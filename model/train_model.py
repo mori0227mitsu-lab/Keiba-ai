@@ -37,7 +37,7 @@ FEATURE_COLS = [
     "race_pace", "pace_fit",
     # 馬の基本情報(その場で分かる)
     "waku", "age", "sex", "jockey", "trainer", "running_style",
-    "weight_carry", "horse_weight", "weight_diff", "popularity",
+    "weight_carry", "horse_weight", "weight_diff", "odds",
     # 過去走から引っ張る情報(予測時にも分かる)
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
     "prev_pace_note", "prev_class_level", "prev_race_time_score", "prev_field_strength_note",
@@ -46,6 +46,44 @@ FEATURE_COLS = [
     "horse_turn_aptitude", "horse_hill_aptitude", "horse_distance_aptitude",
 ]
 TARGET_COL = "is_top3"
+
+# 「勝率」「複勝率」を1つのモデルで一貫性を保ちながら予測するための3クラス分類。
+# 別々のモデルで勝率・複勝率を出すと、理屈上あり得ない
+# 「勝率が複勝率を上回る」という矛盾が起きることがあったため、
+# 1着/2・3着/圏外 の3クラスをまとめて1つのモデルで予測し、
+# 複勝率 = P(1着) + P(2・3着) として足し算で求める構造にする。
+RANK_CLASS_OUT = 0     # 4着以下(圏外)
+RANK_CLASS_PLACE = 1   # 2着または3着
+RANK_CLASS_WIN = 2     # 1着
+
+
+def build_rank_target(finish_rank: pd.Series) -> pd.Series:
+    """finish_rank(着順)から、3クラスの学習ターゲットを作る。"""
+    def _to_class(r):
+        if r == 1:
+            return RANK_CLASS_WIN
+        if r in (2, 3):
+            return RANK_CLASS_PLACE
+        return RANK_CLASS_OUT
+    return finish_rank.apply(_to_class)
+
+
+def derive_probas(rank_model, X) -> tuple:
+    """3クラスモデルのpredict_probaから、(複勝率, 勝率)のペアを導く。
+
+    複勝率 = P(1着) + P(2・3着) なので、構造的に勝率(P(1着)単体)を
+    下回ることがない(矛盾が起きようがない)。
+    """
+    proba_matrix = rank_model.predict_proba(X)
+    classes = list(rank_model.classes_)
+
+    def _col(cls):
+        return proba_matrix[:, classes.index(cls)] if cls in classes else np.zeros(len(X))
+
+    win_proba = _col(RANK_CLASS_WIN)
+    place_proba = _col(RANK_CLASS_PLACE)
+    top3_proba = win_proba + place_proba
+    return top3_proba, win_proba
 
 # 学習データには含まれるが、予測材料には使わない列
 # (そのレースの結果なので、予測時点では未知)
@@ -672,35 +710,39 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
 def train(data_path: str, out_path: str, verbose: bool = True) -> dict:
     """学習を実行し、モデル一式(dict)を返す。out_pathにも保存する。
 
+    「勝率」と「複勝率」は、別々のモデルではなく1つの3クラスモデル
+    (1着/2・3着/圏外)から導く。こうすることで、勝率が複勝率を上回るという
+    構造的にあり得ない矛盾が起きなくなる。
+
     app.py から直接呼び出して「初回アクセス時に自動学習」する用途にも使う。
     """
     df = load_data(data_path)
     X, encoders = build_features(df)
-    y = df[TARGET_COL]
-    y_win = (df["finish_rank"] == 1).astype(int)  # 勝率(1着)予測用のターゲット
+    y_rank = build_rank_target(df["finish_rank"])
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y_rank, test_size=0.2, random_state=42, stratify=y_rank
     )
 
-    model = GradientBoostingClassifier(
+    rank_model = GradientBoostingClassifier(
         n_estimators=200, max_depth=3, learning_rate=0.05, random_state=42
     )
-    model.fit(X_train, y_train)
+    rank_model.fit(X_train, y_train)
 
     if verbose:
-        proba = model.predict_proba(X_test)[:, 1]
-        auc = roc_auc_score(y_test, proba)
+        top3_proba_test, _ = derive_probas(rank_model, X_test)
+        y_test_top3 = (y_test == RANK_CLASS_WIN) | (y_test == RANK_CLASS_PLACE)
+        auc = roc_auc_score(y_test_top3, top3_proba_test)
         print(f"検証AUC(複勝): {auc:.3f} (0.5=ランダム, 1.0=完璧)")
 
-    # 勝率(1着)予測モデル。買い目の期待値計算(単勝・馬連・三連複など)に使う。
-    win_model = GradientBoostingClassifier(
+    # 全データで本番用に学習し直す(検証用の分割は精度確認のためだけに使う)
+    rank_model_full = GradientBoostingClassifier(
         n_estimators=200, max_depth=3, learning_rate=0.05, random_state=42
     )
-    win_model.fit(X, y_win)
+    rank_model_full.fit(X, y_rank)
 
     bundle = {
-        "model": model, "win_model": win_model,
+        "model": rank_model_full,
         "encoders": encoders, "feature_cols": FEATURE_COLS,
     }
     if out_path:
@@ -741,7 +783,7 @@ def backtest(data_path: str, n_splits: int = 5, random_state: int = 42, age_filt
     """
     df = load_data(data_path)
     X, encoders = build_features(df)
-    y = df[TARGET_COL].values
+    y_rank = build_rank_target(df["finish_rank"]).values
     race_ids = df["race_id"].values
 
     unique_races = df["race_id"].nunique()
@@ -749,12 +791,13 @@ def backtest(data_path: str, n_splits: int = 5, random_state: int = 42, age_filt
 
     oof_proba = np.zeros(len(df))
     gkf = GroupKFold(n_splits=n_splits)
-    for train_idx, test_idx in gkf.split(X, y, groups=race_ids):
+    for train_idx, test_idx in gkf.split(X, y_rank, groups=race_ids):
         model = GradientBoostingClassifier(
             n_estimators=200, max_depth=3, learning_rate=0.05, random_state=random_state
         )
-        model.fit(X.iloc[train_idx], y[train_idx])
-        oof_proba[test_idx] = model.predict_proba(X.iloc[test_idx])[:, 1]
+        model.fit(X.iloc[train_idx], y_rank[train_idx])
+        top3_proba_fold, _ = derive_probas(model, X.iloc[test_idx])
+        oof_proba[test_idx] = top3_proba_fold
 
     result = df[["race_id", "horse_num", "finish_rank", "popularity", "age"]].copy()
     result["ai_proba"] = oof_proba
