@@ -312,6 +312,100 @@ def fetch_and_parse_netkeiba_result(url: str, race_id: int, race_date: str = "")
 
     return pd.DataFrame(out_rows)[CSV_COLS]
 
+
+# 出走馬テーブル(app.pyの「出走馬の情報」)が期待する列
+HORSE_TABLE_COLS = [
+    "horse_num", "horse_name", "waku", "sex", "age", "jockey", "trainer",
+    "running_style", "weight_carry", "horse_weight", "weight_diff",
+    "prev_rank", "rest_weeks", "popularity", "odds",
+]
+
+
+def fetch_and_parse_netkeiba_shutuba(url: str) -> pd.DataFrame:
+    """netkeibaの「出馬表」ページのURLから直接取得し、出走馬テーブル形式の
+    DataFrameを作る(結果ページ用のfetch_and_parse_netkeiba_resultと対になる関数)。
+
+    出馬表ページには着順・タイム・馬体重・オッズ・人気がまだ確定していないことが
+    多いので、その場合は妥当な既定値で埋める(parse_netkeiba_shutuba()と同じ考え方)。
+    """
+    soup = _fetch_soup(url, kind="shutuba")
+    race_table = _find_race_table(soup)
+    if race_table is None:
+        raise ValueError("出走馬の表が見つかりませんでした。")
+
+    trs = race_table.find_all("tr")
+    if len(trs) < 2:
+        raise ValueError("出走馬の表の行数が想定より少ないです。")
+
+    header_cells = [c.get_text(strip=True) for c in trs[0].find_all(["td", "th"])]
+    role_to_idx = _map_columns(header_cells)
+    required_roles = ["horse_num", "name", "sex_age", "jockey"]
+    if not all(r in role_to_idx for r in required_roles):
+        raise ValueError("表の列構成を認識できませんでした(見出しの形式が想定と違う可能性があります)。")
+
+    rows = []
+    for tr in trs[1:]:
+        cells = [c.get_text(separator=" ", strip=True) for c in tr.find_all(["td", "th"])]
+        if not any(c != "" for c in cells):
+            continue
+
+        def get(role, default=""):
+            idx = role_to_idx.get(role)
+            return cells[idx] if idx is not None and idx < len(cells) else default
+
+        name = get("name")
+        if not name:
+            continue
+
+        horse_num_raw = get("horse_num")
+        if not horse_num_raw.isdigit():
+            continue
+        horse_num = int(horse_num_raw)
+
+        sex_age = get("sex_age")
+        sex_m = re.match(r"([牡牝セ])(\d+)", sex_age)
+        sex = sex_m.group(1) if sex_m else "牡"
+        age = int(sex_m.group(2)) if sex_m else 0
+
+        weight_m = re.match(r"(\d{2,3})\(([+-]?\d+)\)", get("weight").replace(" ", ""))
+        horse_weight = int(weight_m.group(1)) if weight_m else 460
+        weight_diff = int(weight_m.group(2)) if weight_m else 0
+
+        popularity_raw = get("popularity").replace("*", "").strip()
+        popularity = int(popularity_raw) if popularity_raw.isdigit() else horse_num
+
+        odds_raw = get("odds").replace("*", "").replace("-", "").strip()
+        try:
+            odds = float(odds_raw) if odds_raw else 10.0
+        except ValueError:
+            odds = 10.0
+
+        waku_raw = get("waku")
+        waku = int(waku_raw) if waku_raw.isdigit() else 1
+
+        rows.append({
+            "horse_num": horse_num,
+            "horse_name": name,
+            "waku": waku,
+            "sex": sex,
+            "age": age,
+            "jockey": _clean(get("jockey")),
+            "trainer": _clean(get("trainer")),
+            "running_style": "差し",  # 出馬表には脚質情報が無いため既定値
+            "weight_carry": float(get("weight_carry") or 55.0),
+            "horse_weight": horse_weight,
+            "weight_diff": weight_diff,
+            "prev_rank": 0,
+            "rest_weeks": 0,
+            "popularity": popularity,
+            "odds": odds,
+        })
+
+    if not rows:
+        raise ValueError("出走馬の行を1件も読み取れませんでした。")
+
+    return pd.DataFrame(rows)[HORSE_TABLE_COLS]
+
 HEADER_RE = re.compile(
     r"発走\s*/\s*(?P<track>芝|ダ)(?P<distance>\d+)m.*?/\s*馬場:(?P<condition>\S+)\n"
     r"(?:.*\n)?"
