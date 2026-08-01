@@ -1201,6 +1201,19 @@ def main():
         # 「勝率が複勝率を上回る」という矛盾は起きようがない。
         proba, win_proba = derive_probas(bundle["model"], X)
 
+        # ただし、この時点の値は「馬1頭ごとに独立」に計算したものなので、
+        # レース全体で見た時に「勝率の合計が100%(1着になる馬は必ず1頭)」
+        # 「複勝率の合計が300%(3着以内に入る馬は必ず3頭)」になる保証が無い。
+        # そこでレース単位で比率を保ったまま正規化する。
+        # (「勝率×オッズ」を正しい期待値として扱うには、勝率の合計が100%に
+        #  なっていることが重要なので、こちらを優先する)
+        win_sum = win_proba.sum()
+        if win_sum > 0:
+            win_proba = win_proba / win_sum
+        top3_sum = proba.sum()
+        if top3_sum > 0:
+            proba = proba / top3_sum * min(3, len(proba))
+
         display_cols = ["horse_num", "horse_name", "waku", "jockey", "popularity", "odds"]
         result = edited[[c for c in display_cols if c in edited.columns]].copy()
         if "running_style" in df.columns:
