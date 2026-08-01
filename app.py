@@ -1078,26 +1078,6 @@ def main():
                 "netkeibaアプリ/サイトの「出馬表」ページで、表の部分を選択してコピーし、"
                 "そのままここに貼り付けてください。"
             )
-            with st.expander("🔗 URLを貼るだけで取得する(実験的機能)"):
-                st.caption(
-                    "コピペの代わりに、netkeibaの出馬表ページのURLを貼って自動取得を試せます。"
-                    "サイトの構造次第でうまく取れないこともあるので、その場合は上のコピペ方式を使ってください。"
-                )
-                shutuba_url = st.text_input(
-                    "出馬表のURL",
-                    key=f"shutuba_url_input_{st.session_state.shutuba_url_version}",
-                )
-                if st.button("URLから取得", key="shutuba_url_fetch"):
-                    try:
-                        with st.spinner("取得中..."):
-                            shutuba_df = fetch_and_parse_netkeiba_shutuba(shutuba_url)
-                        st.session_state.horse_df = shutuba_df
-                        st.session_state.horse_table_version += 1
-                        st.session_state.shutuba_url_version += 1
-                        st.toast(f"{len(shutuba_df)}頭分を取得し、下の表に反映しました。", icon="✅")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"取得・解析に失敗しました: {e}")
             raw_pasted = st.text_area(
                 "netkeiba出馬表", height=150,
                 key=f"raw_paste_{st.session_state.raw_paste_version}",
