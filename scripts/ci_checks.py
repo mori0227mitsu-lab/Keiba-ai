@@ -47,12 +47,21 @@ def check_imports():
 
 
 def check_training():
-    from model.train_model import train
+    from model.train_model import train, derive_probas, build_features, load_data
     if not os.path.exists(DATA_PATH):
         raise FileNotFoundError(f"データファイルが見つかりません: {DATA_PATH}")
     bundle = train(DATA_PATH, out_path=None, verbose=False)
-    if "model" not in bundle or "win_model" not in bundle:
-        raise ValueError("学習結果にmodel/win_modelが含まれていません")
+    if "model" not in bundle:
+        raise ValueError("学習結果にmodelが含まれていません")
+
+    # 複勝率・勝率が導けるか、また「勝率が複勝率を上回る」矛盾が
+    # 起きていないかも確認する(以前このバグを踏んだことがあるため)
+    df = load_data(DATA_PATH)
+    X, _ = build_features(df, encoders=bundle["encoders"])
+    top3_proba, win_proba = derive_probas(bundle["model"], X)
+    violations = (win_proba > top3_proba + 1e-9).sum()
+    if violations > 0:
+        raise ValueError(f"勝率が複勝率を上回っている行が{violations}件あります")
 
 
 def check_schema():
