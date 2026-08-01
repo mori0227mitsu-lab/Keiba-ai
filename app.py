@@ -31,7 +31,7 @@ from model.train_model import (
 )
 from data_collector import (
     parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df,
-    fetch_netkeiba_text, fetch_and_parse_netkeiba_result,
+    fetch_netkeiba_text, fetch_and_parse_netkeiba_result, fetch_and_parse_netkeiba_shutuba,
 )
 from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
 from race_class import RACE_CLASS_PATTERNS, describe_race_level
@@ -1090,14 +1090,14 @@ def main():
                 if st.button("URLから取得", key="shutuba_url_fetch"):
                     try:
                         with st.spinner("取得中..."):
-                            fetched_text = fetch_netkeiba_text(shutuba_url)
-                        st.session_state.raw_paste_version += 1
-                        st.session_state[f"raw_paste_{st.session_state.raw_paste_version}"] = fetched_text
+                            shutuba_df = fetch_and_parse_netkeiba_shutuba(shutuba_url)
+                        st.session_state.horse_df = shutuba_df
+                        st.session_state.horse_table_version += 1
                         st.session_state.shutuba_url_version += 1
-                        st.toast("取得しました。下の欄に反映しています。", icon="✅")
+                        st.toast(f"{len(shutuba_df)}頭分を取得し、下の表に反映しました。", icon="✅")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"取得に失敗しました: {e}")
+                        st.error(f"取得・解析に失敗しました: {e}")
             raw_pasted = st.text_area(
                 "netkeiba出馬表", height=150,
                 key=f"raw_paste_{st.session_state.raw_paste_version}",
