@@ -210,6 +210,52 @@ def _format_time(time_sec):
     return f"{seconds:.1f}"
 
 
+def _x_weight(text: str) -> int:
+    """Xの文字数カウント方式を概算する(全角相当の文字は2、それ以外は1として計算)。
+
+    Xの無料枠は実質全角140文字(=280相当)までなので、この関数で概算しながら
+    ツイート文を組み立てる。
+    """
+    import unicodedata
+    total = 0
+    for ch in text:
+        w = unicodedata.east_asian_width(ch)
+        total += 2 if w in ("W", "F") else 1
+    return total
+
+
+def generate_tweet_text(result: pd.DataFrame, race_label: str = "") -> str:
+    """予測結果(印付きのDataFrame)から、そのままXに貼れるツイート文を作る。
+
+    ◎○▲は馬名込み、△・⭐は馬番だけの簡潔な表記にすることで、
+    頭数が多いレースでも文字数(280相当)に収まりやすくする。
+    """
+    lines = []
+    if race_label:
+        lines.append(f"【{race_label}】")
+
+    for mark in ["◎", "○", "▲"]:
+        row = result[result["印"] == mark]
+        if len(row):
+            r = row.iloc[0]
+            lines.append(f"{mark}{r['馬番']}{r['馬名']}")
+
+    for mark, label in [("△", "△"), ("⭐", "⭐")]:
+        rows = result[result["印"] == mark]
+        if len(rows):
+            nums = ".".join(str(n) for n in rows["馬番"])
+            lines.append(f"{label}{nums}")
+
+    text = "\n".join(lines) + "\n\n#競馬"
+
+    # 文字数(概算)が280相当を超えていたら、最後の行から順に削って調整する
+    while _x_weight(text) > 280 and len(lines) > 1:
+        lines = lines[:-1]
+        text = "\n".join(lines) + "\n\n#競馬"
+
+    return text
+
+
 def generate_scouting_memos(max_n: int = 5) -> list:
     """展開評価・距離延長候補・相手のレベル評価が付いた馬について、
     そのままnoteに貼れる下書き文章(1頭1段落)のリストを生成する。
@@ -1342,6 +1388,22 @@ def main():
             "「人気とのズレ」がプラスの馬は、AIが市場(人気)より高く評価している= 妙味のある穴馬候補です。"
             "マイナスの馬は人気先行の可能性があります。"
         )
+
+        st.markdown("---")
+        section_head("🐦", "ツイート文を作る")
+        race_label = st.text_input(
+            "レース名(【】の中に入る文字。空欄でもOK)",
+            value=st.session_state.get("tweet_race_label", ""),
+            key="tweet_race_label_input",
+        )
+        if st.button("ツイート文を生成", key="gen_tweet_btn"):
+            st.session_state.tweet_text = generate_tweet_text(result, race_label)
+        if "tweet_text" in st.session_state:
+            st.text_area(
+                "生成されたツイート文(コピーしてXに貼ってください)",
+                value=st.session_state.tweet_text, height=180, key="tweet_text_display",
+            )
+            st.caption(f"文字数(概算): {_x_weight(st.session_state.tweet_text)} / 280")
 
         top3_picks = result.iloc[:3] if len(result) >= 3 else result
         if len(top3_picks) >= 2:
