@@ -1001,6 +1001,18 @@ def main():
         ),
     )
 
+    col_line1, col_line2 = st.columns(2)
+    with col_line1:
+        aite_line = st.slider(
+            "相手ライン(複勝確率%・△の追加基準)", min_value=0, max_value=60, value=20, step=1,
+            help="◎○▲(単勝期待値トップ1頭+複勝確率上位2頭)以外で、複勝確率がこの数値を超えた馬は全員△にします。頭数は固定しません。",
+        )
+    with col_line2:
+        ana_line = st.slider(
+            "穴ライン(単勝期待値・⭐の追加基準)", min_value=0.0, max_value=3.0, value=1.0, step=0.1,
+            help="足切りされた馬(複勝確率が最低ライン未満)の中で、単勝期待値がこの数値を超えた馬は全員⭐にします。",
+        )
+
     section_head("2", "出走馬の情報")
 
     if "horse_df" not in st.session_state:
@@ -1235,22 +1247,46 @@ def main():
         else:
             result["単勝期待値"] = 0.0
 
-        # 単勝期待値をそのまま総合スコアとして使う(複勝確率は掛けない)。
-        # ただし、複勝確率が最低ライン(min_proba_for_mark)を下回る馬は、
-        # 単勝期待値がどれだけ高くても印の対象から外す(足切り)。
+        # 単勝期待値をそのまま総合スコアとして使う(参考表示・◎の決定に使う)
+        result["総合スコア"] = result["単勝期待値"]
+
+        # 複勝確率が最低ライン(min_proba_for_mark)を下回る馬は「足切り」対象。
         # 極端な人気薄は勝率の推定自体が不安定で、期待値の数字だけが
         # 偶然大きく出てしまうことがあるための対策。
-        result["総合スコア"] = result["単勝期待値"]
         eligible_mask = (result["複勝確率(%)"] >= min_proba_for_mark).values
-        eligible = result[eligible_mask].sort_values("総合スコア", ascending=False)
-        ineligible = result[~eligible_mask].sort_values("総合スコア", ascending=False)
-        result = pd.concat([eligible, ineligible], ignore_index=True)
-        marks = assign_marks(len(result))
-        n_eligible = int(eligible_mask.sum())
-        # 足切りを通過した馬が印の必要数より少ない場合に備えて、
-        # 足切りに引っかかった馬には(たとえ順位が上位に来ても)印をつけない
-        marks = [m if i < n_eligible else "" for i, m in enumerate(marks)]
-        result.insert(0, "印", marks)
+        eligible = result[eligible_mask].copy()
+        ineligible = result[~eligible_mask].copy()
+
+        marks_map = {}  # 元のindex -> 印
+
+        if len(eligible):
+            # ◎: 足切りを通過した馬の中で、単勝期待値が一番高い馬
+            axis_idx = eligible["総合スコア"].idxmax()
+            marks_map[axis_idx] = "◎"
+
+            # ○▲△: ◎以外を複勝確率が高い順に並べ、上位2頭を○▲、
+            # それ以降は「相手ライン」を超えている限り全員△にする(頭数は可変)
+            others = eligible.drop(index=axis_idx).sort_values("複勝確率(%)", ascending=False)
+            aite_marks = ["○", "▲"]
+            for rank, (idx, row) in enumerate(others.iterrows()):
+                if rank < len(aite_marks):
+                    marks_map[idx] = aite_marks[rank]
+                elif row["複勝確率(%)"] >= aite_line:
+                    marks_map[idx] = "△"
+                else:
+                    break  # 複勝確率順なので、ラインを割ったらそれ以降も全て割る
+
+        # ⭐: 足切りされた馬の中で、単勝期待値が「穴ライン」を超えた馬は全員(頭数は可変)
+        for idx, row in ineligible.iterrows():
+            if row["総合スコア"] >= ana_line:
+                marks_map[idx] = "⭐"
+
+        # 印がついた馬を上(◎○▲△⭐の順)、それ以外を総合スコア順に並べ直す
+        mark_priority = {"◎": 0, "○": 1, "▲": 2, "△": 3, "⭐": 4}
+        result["印"] = result.index.map(lambda i: marks_map.get(i, ""))
+        result["_並び順"] = result["印"].map(lambda m: mark_priority.get(m, 99))
+        result = result.sort_values(["_並び順", "総合スコア"], ascending=[True, False]).drop(columns="_並び順").reset_index(drop=True)
+        result = result[["印"] + [c for c in result.columns if c != "印"]]
 
         # AIの評価順位と人気のズレから「妙味」を判定する
         ai_rank = pd.Series(range(1, len(result) + 1), index=result.index)
