@@ -992,6 +992,15 @@ def main():
         ),
     )
 
+    min_proba_for_mark = st.slider(
+        "印をつける最低ライン(複勝確率%)", min_value=0, max_value=40, value=15, step=1,
+        help=(
+            "複勝確率がこの数値を下回る馬は、単勝期待値がどれだけ高くても印の対象から外します。"
+            "極端な人気薄は、勝率の推定自体がまだ不安定なことが多く、期待値の数字だけが偶然大きく"
+            "出てしまうことがあるための足切りです。0にすると足切りなしになります。"
+        ),
+    )
+
     section_head("2", "出走馬の情報")
 
     if "horse_df" not in st.session_state:
@@ -1226,14 +1235,22 @@ def main():
         else:
             result["単勝期待値"] = 0.0
 
-        # 印は「複勝確率×単勝期待値」が高い順に決める。
-        # 単勝期待値だけで決めると、勝率の推定が不安定になりがちな極端な人気薄
-        # (オッズが高いほど、確率のわずかな見積もり誤差が期待値を大きく揺らす)に
-        # 偏りやすいため、複勝確率(=データがより安定している指標)を掛け合わせて
-        # 「確率的な裏付けが十分にある期待値」を重視するようにしている。
-        result["総合スコア"] = (proba * result["単勝期待値"]).round(3)
-        result = result.sort_values("総合スコア", ascending=False).reset_index(drop=True)
-        result.insert(0, "印", assign_marks(len(result)))
+        # 単勝期待値をそのまま総合スコアとして使う(複勝確率は掛けない)。
+        # ただし、複勝確率が最低ライン(min_proba_for_mark)を下回る馬は、
+        # 単勝期待値がどれだけ高くても印の対象から外す(足切り)。
+        # 極端な人気薄は勝率の推定自体が不安定で、期待値の数字だけが
+        # 偶然大きく出てしまうことがあるための対策。
+        result["総合スコア"] = result["単勝期待値"]
+        eligible_mask = (result["複勝確率(%)"] >= min_proba_for_mark).values
+        eligible = result[eligible_mask].sort_values("総合スコア", ascending=False)
+        ineligible = result[~eligible_mask].sort_values("総合スコア", ascending=False)
+        result = pd.concat([eligible, ineligible], ignore_index=True)
+        marks = assign_marks(len(result))
+        n_eligible = int(eligible_mask.sum())
+        # 足切りを通過した馬が印の必要数より少ない場合に備えて、
+        # 足切りに引っかかった馬には(たとえ順位が上位に来ても)印をつけない
+        marks = [m if i < n_eligible else "" for i, m in enumerate(marks)]
+        result.insert(0, "印", marks)
 
         # AIの評価順位と人気のズレから「妙味」を判定する
         ai_rank = pd.Series(range(1, len(result) + 1), index=result.index)
