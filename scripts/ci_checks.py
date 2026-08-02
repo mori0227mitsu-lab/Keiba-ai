@@ -11,6 +11,7 @@ GitHub Actions(CI)で毎回自動実行される健康診断スクリプト。
 2. 今のデータ(data/dummy_races.csv)で実際にモデルが学習できるか
 3. データの基本的なスキーマが崩れていないか
 4. 出走馬名がほぼ完全一致する「重複レース」が紛れ込んでいないか
+5. 同じrace_idに複数の別レースが混在していないか(race_id衝突)
 """
 import os
 import sys
@@ -103,10 +104,43 @@ def check_no_duplicate_races():
         raise ValueError(f"出走馬がほぼ一致するrace_idの組み合わせが見つかりました(重複の疑い): {dups}")
 
 
+def check_no_race_id_collision():
+    """同じrace_idなのに、実際には複数の別レースが混在しているケースを検出する。
+
+    手動でrace_idの開始番号を指定した際に、複数のレースで同じ番号から
+    始めてしまうと発生する。「重複レースの検出」(check_no_duplicate_races)
+    とは逆方向のチェック: あちらは「別IDなのに中身が同じ」を検出するが、
+    こちらは「同じIDなのに中身が別」を検出する。
+
+    判定基準:
+    - 同じrace_idの中に finish_rank == 1(1着)の行が2件以上ある
+      → 1レースに1着馬は1頭のはずなので、複数レースが混ざっている強い証拠
+    - 同じrace_idの出走頭数が18頭を超えている
+      → JRAの1レース最大出走頭数(18頭)を超えることは無い
+    """
+    import pandas as pd
+    df = pd.read_csv(DATA_PATH)
+    if "race_id" not in df.columns or "finish_rank" not in df.columns or len(df) == 0:
+        return
+    collisions = []
+    for rid, group in df.groupby("race_id"):
+        n_horses = len(group)
+        n_winners = (group["finish_rank"] == 1).sum()
+        if n_winners >= 2:
+            collisions.append((rid, "1着馬が複数", int(n_winners)))
+        elif n_horses > 18:
+            collisions.append((rid, "頭数が18を超過", int(n_horses)))
+    if collisions:
+        raise ValueError(
+            f"同じrace_idに別レースが混在している疑いがあります(race_id, 理由, 件数): {collisions}"
+        )
+
+
 def main():
     check("主要モジュールのimport", check_imports)
     check("データのスキーマ", check_schema)
     check("重複レースの検出", check_no_duplicate_races)
+    check("race_id衝突の検出", check_no_race_id_collision)
     check("モデルの学習", check_training)
 
     print()
