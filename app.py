@@ -1086,6 +1086,64 @@ def main():
             elif r["removed"] == 0:
                 st.info("完全重複は見つかりませんでした。反映の必要はありません。")
 
+            if r["remaining"]:
+                st.markdown("---")
+                st.write("**race_id衝突の自動振り分け**")
+                st.caption(
+                    "同じrace_idの中で、行の並び順のまま見ていき、「1着(finish_rank=1)」が"
+                    "出てくるたびに「別レースの始まり」と判断して、2つ目以降のレースには"
+                    "新しいrace_idを割り振ります。"
+                )
+                if st.button("race_id衝突を自動で振り分ける", key="collision_split_btn"):
+                    df_split = r["df_dedup"].copy()
+                    remaining_ids = {rid for rid, _ in r["remaining"]}
+                    next_id = int(df_split["race_id"].max()) + 1
+                    split_log = []
+
+                    new_race_id_col = df_split["race_id"].copy()
+                    for rid in remaining_ids:
+                        idxs = df_split.index[df_split["race_id"] == rid].tolist()
+                        current_id = rid
+                        seen_first_winner = False
+                        for idx in idxs:
+                            is_winner = df_split.loc[idx, "finish_rank"] == 1
+                            if is_winner:
+                                if seen_first_winner:
+                                    current_id = next_id
+                                    next_id += 1
+                                    split_log.append((rid, current_id))
+                                seen_first_winner = True
+                            new_race_id_col.loc[idx] = current_id
+
+                    df_split["race_id"] = new_race_id_col
+                    st.session_state.collision_split_result = {
+                        "df_split": df_split, "sha": r["sha"], "split_log": split_log,
+                    }
+                    st.toast(f"{len(split_log)}件の新しいrace_idを割り振りました", icon="✅")
+
+            if "collision_split_result" in st.session_state:
+                cr = st.session_state.collision_split_result
+                st.write(f"新しく割り振ったrace_id: {len(cr['split_log'])}件")
+                st.dataframe(
+                    pd.DataFrame(cr["split_log"], columns=["元のrace_id", "新しいrace_id"]),
+                    height=200,
+                )
+                if st.button("振り分け結果をGitHubに反映する", key="collision_split_apply"):
+                    try:
+                        token = st.secrets["github_token"]
+                        repo = st.secrets["github_repo"]
+                        branch = st.secrets.get("github_branch", "main")
+                        csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                        update_csv(
+                            token, repo, branch, csv_path, cr["df_split"], cr["sha"],
+                            message=f"race_id衝突の自動振り分け({len(cr['split_log'])}件)",
+                        )
+                        st.success("GitHubに反映しました。数分後にアプリが自動で再起動します。")
+                        del st.session_state.collision_split_result
+                        del st.session_state.dup_check_result
+                    except Exception as e:
+                        st.error(f"反映に失敗しました: {e}")
+
     section_head("1", "レース条件")
     col0, col1, col2, col3 = st.columns(4)
     with col0:
