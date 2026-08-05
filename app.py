@@ -599,31 +599,34 @@ def main():
         .hero {
             padding: 1.4rem 1.8rem;
             border-radius: 14px;
-            background: linear-gradient(135deg, #2F6F4E 0%, #1F4D37 100%);
-            color: #FAF8F3;
+            background: linear-gradient(135deg, #0F1B2E 0%, #1A3A52 100%);
+            color: #F5F5F5;
             margin-bottom: 1.6rem;
+            border-left: 6px solid #D4AF37;
+            box-shadow: 0 4px 12px rgba(212, 175, 55, 0.15);
         }
         .hero h1 {
             margin: 0;
             font-size: 1.9rem;
             letter-spacing: 0.02em;
+            color: #D4AF37;
         }
         .hero p {
             margin: 0.3rem 0 0 0;
-            color: #E4DCC8;
+            color: #C0C0C0;
             font-size: 0.95rem;
         }
         .section-head {
             display: flex;
             align-items: center;
             gap: 0.5rem;
-            border-left: 5px solid #C9A227;
+            border-left: 5px solid #D4AF37;
             padding-left: 0.6rem;
             margin: 1.4rem 0 0.6rem 0;
         }
         .section-head .num {
-            background: #2F6F4E;
-            color: #FAF8F3;
+            background: linear-gradient(135deg, #D4AF37 0%, #B8860B 100%);
+            color: #0F1B2E;
             border-radius: 50%;
             width: 1.6rem;
             height: 1.6rem;
@@ -631,19 +634,48 @@ def main():
             align-items: center;
             justify-content: center;
             font-size: 0.85rem;
-            font-weight: 600;
+            font-weight: 700;
+            box-shadow: 0 2px 6px rgba(212, 175, 55, 0.3);
         }
         .section-head .label {
             font-size: 1.05rem;
             font-weight: 600;
-            color: #1F2A24;
+            color: #F5F5F5;
         }
         .disclaimer {
             font-size: 0.78rem;
-            color: #8A8578;
-            border-top: 1px solid #E7E2D6;
+            color: #999999;
+            border-top: 1px solid #D4AF37;
+            border-top-opacity: 0.3;
             padding-top: 0.6rem;
             margin-top: 1rem;
+        }
+        
+        /* 印の装飾（◎○▲△⭐） */
+        .mark-symbol {
+            display: inline-block;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-weight: 700;
+            font-size: 1.1rem;
+            margin-right: 0.3rem;
+        }
+        .mark-ace {
+            color: #D4AF37;
+            text-shadow: 0 0 8px rgba(212, 175, 55, 0.5);
+        }
+        .mark-big {
+            color: #FFD700;
+        }
+        .mark-win {
+            color: #FFB6C1;
+        }
+        .mark-horse {
+            color: #87CEEB;
+        }
+        .mark-star {
+            color: #FFD700;
+            filter: drop-shadow(0 0 4px rgba(255, 215, 0, 0.6));
         }
         </style>
         <div class="hero">
