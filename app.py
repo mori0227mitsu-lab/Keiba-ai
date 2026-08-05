@@ -33,7 +33,7 @@ from data_collector import (
     parse_netkeiba_result, parse_netkeiba_results_multi, apply_corner_section_to_df,
     fetch_netkeiba_text, fetch_and_parse_netkeiba_result, fetch_and_parse_netkeiba_shutuba,
 )
-from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id
+from github_sync import append_rows_to_csv, fetch_csv, find_existing_race_ids, get_next_race_id, update_csv
 from race_class import RACE_CLASS_PATTERNS, describe_race_level
 from course_info import (
     COURSE_DISTANCES,
@@ -1021,6 +1021,70 @@ def main():
         if "scouting_memo_drafts" in st.session_state:
             full_text = "\n\n".join(st.session_state.scouting_memo_drafts)
             st.text_area("下書き(コピーしてnoteに貼ってください)", value=full_text, height=400)
+
+    with st.expander("🧹 データの健康診断(重複チェック・修復)"):
+        st.caption(
+            "GitHub上のdata/dummy_races.csvを直接確認し、完全に同じ内容の行が"
+            "重複していないかチェックします。パソコンやターミナルは不要です。"
+        )
+        if st.button("重複をチェックする", key="dup_check_btn"):
+            try:
+                token = st.secrets["github_token"]
+                repo = st.secrets["github_repo"]
+                branch = st.secrets.get("github_branch", "main")
+                csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                with st.spinner("GitHubから取得中..."):
+                    df_check, sha = fetch_csv(token, repo, branch, csv_path)
+
+                before = len(df_check)
+                df_dedup = df_check.drop_duplicates(keep="first").reset_index(drop=True)
+                removed = before - len(df_dedup)
+
+                # 完全重複を除いた後も、同じrace_idに1着馬が複数いないか確認
+                remaining = []
+                if "finish_rank" in df_dedup.columns:
+                    for rid, group in df_dedup.groupby("race_id"):
+                        n_winners = (group["finish_rank"] == 1).sum()
+                        if n_winners >= 2:
+                            remaining.append((rid, int(n_winners)))
+
+                st.session_state.dup_check_result = {
+                    "before": before, "after": len(df_dedup), "removed": removed,
+                    "remaining": remaining, "df_dedup": df_dedup, "sha": sha,
+                }
+                st.toast("チェック完了", icon="✅")
+            except Exception as e:
+                st.error(f"チェックに失敗しました: {e}")
+
+        if "dup_check_result" in st.session_state:
+            r = st.session_state.dup_check_result
+            st.write(f"元の行数: {r['before']}行 → 完全重複を除いた行数: {r['after']}行(削除: {r['removed']}行)")
+            if r["remaining"]:
+                st.warning(
+                    f"⚠️ 完全重複の削除だけでは解決しない、race_id衝突の疑いが{len(r['remaining'])}件残っています: "
+                    f"{r['remaining'][:10]}{'...' if len(r['remaining']) > 10 else ''}"
+                )
+                st.caption("これらは個別確認が必要です。ひとまず完全重複の削除だけ反映することもできます。")
+            else:
+                st.success("✅ 完全重複を削除すれば、他の問題は残っていません。")
+
+            if r["removed"] > 0:
+                if st.button("この修復をGitHubに反映する", key="dup_fix_apply"):
+                    try:
+                        token = st.secrets["github_token"]
+                        repo = st.secrets["github_repo"]
+                        branch = st.secrets.get("github_branch", "main")
+                        csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                        update_csv(
+                            token, repo, branch, csv_path, r["df_dedup"], r["sha"],
+                            message=f"重複データの自動修復({r['removed']}行削除)",
+                        )
+                        st.success("GitHubに反映しました。数分後にアプリが自動で再起動します。")
+                        del st.session_state.dup_check_result
+                    except Exception as e:
+                        st.error(f"反映に失敗しました: {e}")
+            elif r["removed"] == 0:
+                st.info("完全重複は見つかりませんでした。反映の必要はありません。")
 
     section_head("1", "レース条件")
     col0, col1, col2, col3 = st.columns(4)
