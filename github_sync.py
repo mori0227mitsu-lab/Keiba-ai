@@ -22,30 +22,91 @@ def _headers(token: str) -> dict:
 
 
 def fetch_csv(token: str, repo: str, branch: str, path: str):
-    """GitHub上のCSVファイルを取得する。戻り値: (DataFrame, sha)"""
+    """GitHub上のCSVファイルを取得する。戻り値: (DataFrame, sha)
+
+    GitHubのContents APIは1MBを超えるファイルの中身(content)を
+    返さない制限があるため、その場合はGit Blobs API(100MBまで対応)に
+    切り替えて取得する。
+    """
     url = f"{API_BASE}/repos/{repo}/contents/{path}"
     resp = requests.get(url, headers=_headers(token), params={"ref": branch}, timeout=20)
     resp.raise_for_status()
     data = resp.json()
-    content = base64.b64decode(data["content"]).decode("utf-8-sig")
+    sha = data["sha"]
+
+    raw_content = data.get("content", "")
+    if not raw_content:
+        # 1MB超などでcontentが空だった場合、Git Blobs APIで取り直す
+        blob_url = f"{API_BASE}/repos/{repo}/git/blobs/{sha}"
+        blob_resp = requests.get(blob_url, headers=_headers(token), timeout=30)
+        blob_resp.raise_for_status()
+        raw_content = blob_resp.json()["content"]
+
+    content = base64.b64decode(raw_content).decode("utf-8-sig")
     df = pd.read_csv(io.StringIO(content))
-    return df, data["sha"]
+    return df, sha
 
 
 def update_csv(token: str, repo: str, branch: str, path: str, df: pd.DataFrame, sha: str, message: str):
-    """CSVファイルの中身を丸ごと置き換えてコミットする。"""
+    """CSVファイルの中身を丸ごと置き換えてコミットする。
+
+    Contents API(PUT)は1MB超のファイルで不安定になることがあるため、
+    Git Data API(blob→tree→commit→ref更新)を使って、サイズに関わらず
+    確実に反映できるようにする。
+    """
     csv_text = df.to_csv(index=False)
     content_b64 = base64.b64encode(csv_text.encode("utf-8-sig")).decode("ascii")
-    url = f"{API_BASE}/repos/{repo}/contents/{path}"
-    body = {
-        "message": message,
-        "content": content_b64,
-        "sha": sha,
-        "branch": branch,
-    }
-    resp = requests.put(url, headers=_headers(token), json=body, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
+    headers = _headers(token)
+
+    # 1. blobを作成(ファイルの中身そのもの)
+    blob_resp = requests.post(
+        f"{API_BASE}/repos/{repo}/git/blobs", headers=headers,
+        json={"content": content_b64, "encoding": "base64"}, timeout=30,
+    )
+    blob_resp.raise_for_status()
+    blob_sha = blob_resp.json()["sha"]
+
+    # 2. 現在のブランチが指すcommitと、そのtreeを取得
+    ref_resp = requests.get(
+        f"{API_BASE}/repos/{repo}/git/ref/heads/{branch}", headers=headers, timeout=20,
+    )
+    ref_resp.raise_for_status()
+    base_commit_sha = ref_resp.json()["object"]["sha"]
+
+    commit_resp = requests.get(
+        f"{API_BASE}/repos/{repo}/git/commits/{base_commit_sha}", headers=headers, timeout=20,
+    )
+    commit_resp.raise_for_status()
+    base_tree_sha = commit_resp.json()["tree"]["sha"]
+
+    # 3. 新しいtreeを作成(対象ファイルだけを新しいblobに差し替え)
+    tree_resp = requests.post(
+        f"{API_BASE}/repos/{repo}/git/trees", headers=headers,
+        json={
+            "base_tree": base_tree_sha,
+            "tree": [{"path": path, "mode": "100644", "type": "blob", "sha": blob_sha}],
+        },
+        timeout=20,
+    )
+    tree_resp.raise_for_status()
+    new_tree_sha = tree_resp.json()["sha"]
+
+    # 4. 新しいcommitを作成
+    new_commit_resp = requests.post(
+        f"{API_BASE}/repos/{repo}/git/commits", headers=headers,
+        json={"message": message, "tree": new_tree_sha, "parents": [base_commit_sha]},
+        timeout=20,
+    )
+    new_commit_resp.raise_for_status()
+    new_commit_sha = new_commit_resp.json()["sha"]
+
+    # 5. ブランチの参照先を新しいcommitに更新
+    update_ref_resp = requests.patch(
+        f"{API_BASE}/repos/{repo}/git/refs/heads/{branch}", headers=headers,
+        json={"sha": new_commit_sha}, timeout=20,
+    )
+    update_ref_resp.raise_for_status()
+    return update_ref_resp.json()
 
 
 def append_rows_to_csv(token: str, repo: str, branch: str, path: str, new_rows: pd.DataFrame, message: str) -> int:
