@@ -1,6 +1,10 @@
 [theme]
-primaryColor = "#2F6F4E"
-backgroundColor = "#FAF8F3"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#1F2A24"
+# 競馬らしい配色：
+# - ゴールド：馬券・勝利・高級感
+# - 濃紺：伝統・夜間競馬
+# - 濃い緑：競馬場の芝
+primaryColor = "#D4AF37"
+backgroundColor = "#0F1B2E"
+secondaryBackgroundColor = "#1A3A52"
+textColor = "#F5F5F5"
 font = "sans serif"
