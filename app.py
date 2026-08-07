@@ -1154,61 +1154,71 @@ def main():
 
             if r["remaining"]:
                 st.markdown("---")
-                st.write("**race_id衝突の自動振り分け**")
+                st.write(f"**race_id衝突を1件ずつ確認して直す({len(r['remaining'])}件)**")
                 st.caption(
-                    "同じrace_idの中で、行の並び順のまま見ていき、「1着(finish_rank=1)」が"
-                    "出てくるたびに「別レースの始まり」と判断して、2つ目以降のレースには"
-                    "新しいrace_idを割り振ります。"
+                    "一括処理は事故の元になったため廃止しました。1件ずつ中身を見て、"
+                    "納得してから反映してください。"
                 )
-                if st.button("race_id衝突を自動で振り分ける", key="collision_split_btn"):
-                    df_split = r["df_dedup"].copy()
-                    remaining_ids = {rid for rid, _ in r["remaining"]}
-                    next_id = int(df_split["race_id"].max()) + 1
-                    split_log = []
 
-                    new_race_id_col = df_split["race_id"].copy()
-                    for rid in remaining_ids:
-                        idxs = df_split.index[df_split["race_id"] == rid].tolist()
-                        current_id = rid
-                        seen_first_winner = False
-                        for idx in idxs:
-                            is_winner = df_split.loc[idx, "finish_rank"] == 1
-                            if is_winner:
-                                if seen_first_winner:
-                                    current_id = next_id
-                                    next_id += 1
-                                    split_log.append((rid, current_id))
-                                seen_first_winner = True
-                            new_race_id_col.loc[idx] = current_id
+                remaining_ids = [rid for rid, _ in r["remaining"]]
+                if "collision_review_idx" not in st.session_state:
+                    st.session_state.collision_review_idx = 0
+                idx = st.session_state.collision_review_idx
 
-                    df_split["race_id"] = new_race_id_col
-                    st.session_state.collision_split_result = {
-                        "df_split": df_split, "sha": r["sha"], "split_log": split_log,
-                    }
-                    st.toast(f"{len(split_log)}件の新しいrace_idを割り振りました", icon="✅")
+                if idx >= len(remaining_ids):
+                    st.success("✅ 全件確認し終わりました。")
+                else:
+                    rid = remaining_ids[idx]
+                    st.write(f"**{idx + 1} / {len(remaining_ids)}件目: race_id {rid}**")
+                    df_ref = r["df_dedup"]
+                    group = df_ref[df_ref["race_id"] == rid].copy()
+                    show_cols = [c for c in ["horse_name", "finish_rank", "race_date", "venue", "distance"] if c in group.columns]
+                    st.dataframe(group[show_cols], height=min(400, 40 + 35 * len(group)))
 
-            if "collision_split_result" in st.session_state:
-                cr = st.session_state.collision_split_result
-                st.write(f"新しく割り振ったrace_id: {len(cr['split_log'])}件")
-                st.dataframe(
-                    pd.DataFrame(cr["split_log"], columns=["元のrace_id", "新しいrace_id"]),
-                    height=200,
-                )
-                if st.button("振り分け結果をGitHubに反映する", key="collision_split_apply"):
-                    try:
-                        token = st.secrets["github_token"]
-                        repo = st.secrets["github_repo"]
-                        branch = st.secrets.get("github_branch", "main")
-                        csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
-                        update_csv(
-                            token, repo, branch, csv_path, cr["df_split"], cr["sha"],
-                            message=f"race_id衝突の自動振り分け({len(cr['split_log'])}件)",
-                        )
-                        st.success("GitHubに反映しました。数分後にアプリが自動で再起動します。")
-                        del st.session_state.collision_split_result
-                        del st.session_state.dup_check_result
-                    except Exception as e:
-                        st.error(f"反映に失敗しました: {e}")
+                    # 提案: 1着(finish_rank=1)が出るたびに新しいrace_idに分割する案を表示
+                    proposal = []
+                    next_id_preview = int(df_ref["race_id"].max()) + 1 + idx * 10  # 他の確認中IDと衝突しない目安
+                    current_id = rid
+                    seen_first_winner = False
+                    for _, row in group.iterrows():
+                        if row["finish_rank"] == 1:
+                            if seen_first_winner:
+                                current_id = next_id_preview
+                                next_id_preview += 1
+                            seen_first_winner = True
+                        proposal.append(current_id)
+                    group["提案する新しいrace_id"] = proposal
+                    st.caption("提案(1着が出るたびに新しいIDに分割する案):")
+                    st.dataframe(group[show_cols + ["提案する新しいrace_id"]], height=min(400, 40 + 35 * len(group)))
+
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        if st.button("この提案でOK→反映", key=f"collision_ok_{rid}"):
+                            try:
+                                token = st.secrets["github_token"]
+                                repo = st.secrets["github_repo"]
+                                branch = st.secrets.get("github_branch", "main")
+                                csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                                _, current_sha = fetch_csv(token, repo, branch, csv_path)
+                                df_live, _ = fetch_csv(token, repo, branch, csv_path)
+                                mask = df_live["race_id"] == rid
+                                # インデックスがズレる可能性があるため、行の内容(horse_name)で対応付けする
+                                name_to_new_id = dict(zip(group["horse_name"], proposal))
+                                df_live.loc[mask, "race_id"] = df_live.loc[mask, "horse_name"].map(name_to_new_id).fillna(df_live.loc[mask, "race_id"])
+                                update_csv(
+                                    token, repo, branch, csv_path, df_live, current_sha,
+                                    message=f"race_id {rid} の衝突を手動確認して修復",
+                                )
+                                st.success(f"race_id {rid} を反映しました。")
+                                st.session_state.collision_review_idx += 1
+                                del st.session_state.dup_check_result
+                            except Exception as e:
+                                st.error(f"反映に失敗しました: {e}")
+                    with col_b:
+                        if st.button("これはスキップ(後で確認)", key=f"collision_skip_{rid}"):
+                            st.session_state.collision_review_idx += 1
+                    with col_c:
+                        st.caption("提案がおかしい場合はスキップして、直接GitHub上で確認してください。")
 
             if r.get("same_race_pairs"):
                 st.markdown("---")
