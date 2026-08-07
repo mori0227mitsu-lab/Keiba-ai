@@ -1048,9 +1048,28 @@ def main():
                         if n_winners >= 2:
                             remaining.append((rid, int(n_winners)))
 
+                # 別のrace_idなのに、出走馬がほぼ同じ(=同じレースを2回登録した疑い)を検出
+                same_race_pairs = []
+                if "horse_name" in df_dedup.columns:
+                    race_horses = df_dedup.groupby("race_id")["horse_name"].apply(
+                        lambda s: frozenset(s.dropna())
+                    ).to_dict()
+                    seen_ids = list(race_horses.items())
+                    for i, (rid, horses) in enumerate(seen_ids):
+                        if not horses:
+                            continue
+                        for other_rid, other_horses in seen_ids[:i]:
+                            if not other_horses:
+                                continue
+                            overlap = horses & other_horses
+                            smaller = min(len(horses), len(other_horses))
+                            if smaller > 0 and len(overlap) / smaller >= 0.8 and abs(len(horses) - len(other_horses)) <= 2:
+                                same_race_pairs.append((rid, other_rid))
+
                 st.session_state.dup_check_result = {
                     "before": before, "after": len(df_dedup), "removed": removed,
                     "remaining": remaining, "df_dedup": df_dedup, "sha": sha,
+                    "same_race_pairs": same_race_pairs,
                 }
                 st.toast("チェック完了", icon="✅")
             except Exception as e:
@@ -1141,6 +1160,63 @@ def main():
                         st.success("GitHubに反映しました。数分後にアプリが自動で再起動します。")
                         del st.session_state.collision_split_result
                         del st.session_state.dup_check_result
+                    except Exception as e:
+                        st.error(f"反映に失敗しました: {e}")
+
+            if r.get("same_race_pairs"):
+                st.markdown("---")
+                st.write(f"**別IDなのに同じレースの疑い({len(r['same_race_pairs'])}件)**")
+                st.caption("どちらを残すか、内容を見て選んでください。")
+                df_ref = r["df_dedup"]
+                for pair_i, (rid_a, rid_b) in enumerate(r["same_race_pairs"]):
+                    st.markdown(f"race_id **{rid_a}** と race_id **{rid_b}**")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.caption(f"race_id {rid_a}")
+                        st.dataframe(
+                            df_ref[df_ref["race_id"] == rid_a][["horse_name", "finish_rank", "race_date", "venue"]],
+                            height=150,
+                        )
+                    with col_b:
+                        st.caption(f"race_id {rid_b}")
+                        st.dataframe(
+                            df_ref[df_ref["race_id"] == rid_b][["horse_name", "finish_rank", "race_date", "venue"]],
+                            height=150,
+                        )
+                    choice = st.radio(
+                        "残す方",
+                        [f"race_id {rid_a}を残す(race_id {rid_b}を削除)",
+                         f"race_id {rid_b}を残す(race_id {rid_a}を削除)",
+                         "どちらも残す(判断しない)"],
+                        key=f"same_race_choice_{pair_i}", index=2,
+                    )
+                    st.session_state[f"same_race_decision_{pair_i}"] = (rid_a, rid_b, choice)
+                    st.markdown("---")
+
+                if st.button("選んだ内容をGitHubに反映する", key="same_race_apply"):
+                    try:
+                        df_final = r["df_dedup"].copy()
+                        to_delete = []
+                        for pair_i in range(len(r["same_race_pairs"])):
+                            rid_a, rid_b, choice = st.session_state[f"same_race_decision_{pair_i}"]
+                            if choice.startswith(f"race_id {rid_a}を残す"):
+                                to_delete.append(rid_b)
+                            elif choice.startswith(f"race_id {rid_b}を残す"):
+                                to_delete.append(rid_a)
+                        if to_delete:
+                            df_final = df_final[~df_final["race_id"].isin(to_delete)].reset_index(drop=True)
+                            token = st.secrets["github_token"]
+                            repo = st.secrets["github_repo"]
+                            branch = st.secrets.get("github_branch", "main")
+                            csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                            update_csv(
+                                token, repo, branch, csv_path, df_final, r["sha"],
+                                message=f"重複レースの削除(race_id: {to_delete})",
+                            )
+                            st.success(f"race_id {to_delete} を削除してGitHubに反映しました。")
+                            del st.session_state.dup_check_result
+                        else:
+                            st.info("「どちらも残す」以外を選んだ組み合わせがありませんでした。")
                     except Exception as e:
                         st.error(f"反映に失敗しました: {e}")
 
