@@ -714,8 +714,33 @@ def main():
         with colA:
             use_auto_id = st.checkbox("race_idを自動で決める(推奨)", value=True)
         with colB:
+            # 「9001固定」がデフォルトだと、自動取得が失敗した際に手動入力へ切り替えた時、
+            # 既存の最大IDを意識せずそのまま使ってしまい、race_id衝突を引き起こす事故が
+            # 過去に起きたため、可能な限り「今の最大race_id+1」を初期値にする。
+            if "manual_start_id_default" not in st.session_state:
+                try:
+                    token = st.secrets["github_token"]
+                    repo = st.secrets["github_repo"]
+                    branch = st.secrets.get("github_branch", "main")
+                    existing_df_for_default, _ = fetch_csv(token, repo, branch, "data/dummy_races.csv")
+                    st.session_state.manual_start_id_default = (
+                        int(existing_df_for_default["race_id"].max()) + 1
+                        if len(existing_df_for_default) else 9001
+                    )
+                except Exception:
+                    st.session_state.manual_start_id_default = None
+
+            if st.session_state.manual_start_id_default is None:
+                st.warning(
+                    "⚠️ 既存データの取得に失敗したため、開始race_idを自動で提案できません。"
+                    "GitHub上で現在の最大race_idを確認してから、それより大きい数字を入力してください。"
+                )
+                default_start_id = 9001
+            else:
+                default_start_id = st.session_state.manual_start_id_default
+
             manual_start_id = st.number_input(
-                "開始race_id", min_value=1, value=9001, step=1, disabled=use_auto_id,
+                "開始race_id", min_value=1, value=default_start_id, step=1, disabled=use_auto_id,
             )
 
         collect_date = st.date_input(
