@@ -1022,6 +1022,53 @@ def main():
             full_text = "\n\n".join(st.session_state.scouting_memo_drafts)
             st.text_area("下書き(コピーしてnoteに貼ってください)", value=full_text, height=400)
 
+    with st.expander("⏪ 特定のコミット時点に巻き戻す(緊急用)"):
+        st.caption(
+            "自動修復などで想定外にデータが壊れてしまった時、指定したコミットの"
+            "時点の状態にdata/dummy_races.csvを戻します。取り消しはできないので、"
+            "コミットSHA(GitHubの「Commits」履歴に出ている7〜8桁の英数字)を"
+            "よく確認してから実行してください。"
+        )
+        revert_sha = st.text_input(
+            "戻したいコミットのSHA(例: 796dce2)", key="revert_sha_input",
+        )
+        if st.button("このコミット時点のデータを確認する", key="revert_check_btn"):
+            if not revert_sha.strip():
+                st.error("コミットSHAを入力してください。")
+            else:
+                try:
+                    token = st.secrets["github_token"]
+                    repo = st.secrets["github_repo"]
+                    csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                    with st.spinner("取得中..."):
+                        df_old, _ = fetch_csv(token, repo, revert_sha.strip(), csv_path)
+                    st.session_state.revert_preview = {"df": df_old, "sha_ref": revert_sha.strip()}
+                    st.toast(f"{len(df_old)}行を取得しました", icon="✅")
+                except Exception as e:
+                    st.error(f"取得に失敗しました(SHAが正しいか確認してください): {e}")
+
+        if "revert_preview" in st.session_state:
+            rp = st.session_state.revert_preview
+            st.write(f"コミット `{rp['sha_ref']}` 時点の行数: {len(rp['df'])}行")
+            st.dataframe(rp["df"].tail(10), height=200)
+            st.warning("⚠️ この内容で今のGitHubのファイルを上書きします。この操作は取り消せません。")
+            if st.button("この状態に巻き戻す(GitHubに反映)", key="revert_apply_btn"):
+                try:
+                    token = st.secrets["github_token"]
+                    repo = st.secrets["github_repo"]
+                    branch = st.secrets.get("github_branch", "main")
+                    csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                    # 現在のsha(上書き対象)を取得
+                    _, current_sha = fetch_csv(token, repo, branch, csv_path)
+                    update_csv(
+                        token, repo, branch, csv_path, rp["df"], current_sha,
+                        message=f"緊急巻き戻し(コミット{rp['sha_ref']}の状態に復元)",
+                    )
+                    st.success("巻き戻しました。数分後にアプリが自動で再起動します。")
+                    del st.session_state.revert_preview
+                except Exception as e:
+                    st.error(f"反映に失敗しました: {e}")
+
     with st.expander("🧹 データの健康診断(重複チェック・修復)"):
         st.caption(
             "GitHub上のdata/dummy_races.csvを直接確認し、完全に同じ内容の行が"
