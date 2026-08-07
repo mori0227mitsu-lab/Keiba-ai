@@ -28,7 +28,8 @@ CATEGORICAL_COLS = [
     "day_bias", "straight_length", "trainer", "prev_pace_note",
     "turn_direction", "hill", "horse_turn_aptitude", "horse_hill_aptitude",
     "race_class", "prev_field_strength_note", "prev_stretch_out_note",
-    "horse_distance_aptitude", "gate_sensitive", "race_pace", "pace_fit",
+    "horse_distance_aptitude", "horse_straight_aptitude", "horse_venue_aptitude",
+    "gate_sensitive", "race_pace", "pace_fit",
 ]
 FEATURE_COLS = [
     # レース条件(その場で分かる/固定知識)
@@ -42,8 +43,9 @@ FEATURE_COLS = [
     "prev_rank", "rest_weeks", "prev_time_sec", "prev_agari_3f", "prev_corner_pos",
     "prev_pace_note", "prev_class_level", "prev_race_time_score", "prev_field_strength_note",
     "prev_stretch_out_note",
-    # 馬ごとの右左回り・坂・距離の得意不得意(過去の全成績から判定)
+    # 馬ごとの右左回り・坂・距離・直線・競馬場の得意不得意(過去の全成績から判定)
     "horse_turn_aptitude", "horse_hill_aptitude", "horse_distance_aptitude",
+    "horse_straight_aptitude", "horse_venue_aptitude",
 ]
 TARGET_COL = "is_top3"
 
@@ -299,11 +301,17 @@ def compute_horse_course_aptitude(df: pd.DataFrame) -> pd.DataFrame:
         diff_turn_n = n_before - same_turn_n
         diff_turn_top3 = total_top3_before.at[i] - same_turn_top3
 
-        if same_turn_n >= 1 and diff_turn_n >= 1:
-            gap = (same_turn_top3 / same_turn_n) - (diff_turn_top3 / diff_turn_n)
-            if gap >= APTITUDE_DIFF_THRESHOLD:
+        # 右左回りは、サンプル数が少ない偶然での判定を避けるため、
+        # (1)同条件・別条件それぞれ3走以上あること、(2)複勝率の差だけでなく
+        # 複勝率そのものが70%以上(得意)/10%以下(不得意)と、絶対水準でも
+        # 突出していることの両方を満たした場合だけ判定する、より厳しい基準にする。
+        if same_turn_n >= 3 and diff_turn_n >= 3:
+            same_turn_rate = same_turn_top3 / same_turn_n
+            diff_turn_rate = diff_turn_top3 / diff_turn_n
+            gap = same_turn_rate - diff_turn_rate
+            if gap >= APTITUDE_DIFF_THRESHOLD and same_turn_rate >= 0.7:
                 turn_apt.at[i] = f"得意({cur_turn}回り好走歴あり)"
-            elif gap <= -APTITUDE_DIFF_THRESHOLD:
+            elif gap <= -APTITUDE_DIFF_THRESHOLD and same_turn_rate <= 0.1:
                 turn_apt.at[i] = f"不得意({cur_turn}回り苦手傾向)"
             else:
                 turn_apt.at[i] = "差なし"
@@ -402,31 +410,38 @@ def distance_category(distance) -> str:
     return "長距離"
 
 
-def compute_horse_distance_aptitude(df: pd.DataFrame) -> pd.DataFrame:
-    """馬ごとに、距離区分(短距離/マイル/中距離/長距離)ごとの複勝率を比較し、
-    得意不得意を判定する(horse_distance_aptitude)。
+def _compute_category_aptitude(
+    df: pd.DataFrame, cat_col: str, out_col: str,
+    min_races: int = 1, strict_rate: bool = False,
+) -> pd.DataFrame:
+    """馬ごとに、df[cat_col]の区分ごとの複勝率を比較し、得意不得意を判定する汎用関数。
 
-    判定には「そのレースより前の成績だけ」を使う(データリーク防止)。
+    distance_category(距離区分)・straight_length(直線の長さ)・venue(競馬場)など、
+    「回数の少ない区分に馬をグループ分けして、過去の複勝率を比較する」系の
+    適性判定はすべてこの関数で計算できる。判定には「そのレースより前の
+    成績だけ」を使う(データリーク防止)。
+
+    min_races: 同条件・別条件それぞれ最低何走あれば判定するか(既定1走)。
+    strict_rate: Trueの場合、複勝率の差だけでなく、複勝率そのものが
+        70%以上(得意)/10%以下(不得意)という絶対水準も同時に満たす
+        場合だけ判定する(サンプル数が少ない偶然での判定を避けるため)。
     """
     df = df.copy()
-    if not {"horse_name", "distance", "finish_rank", "race_id"}.issubset(df.columns):
-        df["horse_distance_aptitude"] = APTITUDE_UNKNOWN
+    if not {"horse_name", cat_col, "finish_rank", "race_id"}.issubset(df.columns):
+        df[out_col] = APTITUDE_UNKNOWN
         return df
-
-    df["_dist_cat"] = df["distance"].apply(distance_category)
 
     df = add_chronological_sort_key(df)
     df = df.sort_values("_chron_key").reset_index(drop=True)
     is_top3 = (df["finish_rank"] <= 3).astype(int)
 
-    dist_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
+    apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
 
-    # 距離区分は4種類しかないため、区分ごとのone-hot列を作り、馬ごとの
-    # 累積和(そのレースより前の分)を先に計算しておく。これにより、
-    # 各行では引き算だけで「同区分/別区分」の複勝率を求められる
-    # (過去走を毎回総当たりし直すO(k^2)をO(k)に置き換えて高速化)。
+    # 区分ごとのone-hot列を作り、馬ごとの累積和(そのレースより前の分)を
+    # 先に計算しておく。これにより、各行では引き算だけで「同区分/別区分」の
+    # 複勝率を求められる(過去走を毎回総当たりし直すO(k^2)をO(k)に置き換えて高速化)。
     df["_is_top3_tmp"] = is_top3
-    categories = df["_dist_cat"].unique()
+    categories = df[cat_col].dropna().unique()
     grp = df.groupby("horse_name", sort=False)
     cum_total_before = grp.cumcount()
     cum_top3_before = grp["_is_top3_tmp"].cumsum() - df["_is_top3_tmp"]
@@ -434,38 +449,81 @@ def compute_horse_distance_aptitude(df: pd.DataFrame) -> pd.DataFrame:
     cat_total_before = {}
     cat_top3_before = {}
     for cat in categories:
-        is_cat = (df["_dist_cat"] == cat).astype(int)
+        is_cat = (df[cat_col] == cat).astype(int)
         df["_is_cat_tmp"] = is_cat
+        df["_top3_and_cat_tmp"] = df["_is_top3_tmp"] * df["_is_cat_tmp"]
         g2 = df.groupby("horse_name", sort=False)
         cat_total_before[cat] = g2["_is_cat_tmp"].cumsum() - df["_is_cat_tmp"]
-        cat_top3_before[cat] = g2.apply(
-            lambda g: (g["_is_top3_tmp"] * g["_is_cat_tmp"]).cumsum() - g["_is_top3_tmp"] * g["_is_cat_tmp"]
-        ).reset_index(level=0, drop=True).sort_index()
-    df.drop(columns=["_is_cat_tmp"], inplace=True)
+        cat_top3_before[cat] = g2["_top3_and_cat_tmp"].cumsum() - df["_top3_and_cat_tmp"]
+    df.drop(columns=["_is_cat_tmp", "_top3_and_cat_tmp"], inplace=True)
 
     for i in df.index:
         n_before = cum_total_before.at[i]
         if n_before < 2:
             continue
 
-        cur_cat = df.at[i, "_dist_cat"]
+        cur_cat = df.at[i, cat_col]
+        if pd.isna(cur_cat) or cur_cat not in cat_total_before:
+            continue
         same_cat_n = cat_total_before[cur_cat].at[i]
         same_cat_top3 = cat_top3_before[cur_cat].at[i]
         diff_cat_n = n_before - same_cat_n
         diff_cat_top3 = cum_top3_before.at[i] - same_cat_top3
 
-        if same_cat_n >= 1 and diff_cat_n >= 1:
-            gap = (same_cat_top3 / same_cat_n) - (diff_cat_top3 / diff_cat_n)
-            if gap >= APTITUDE_DIFF_THRESHOLD:
-                dist_apt.at[i] = f"得意({cur_cat}好走歴あり)"
-            elif gap <= -APTITUDE_DIFF_THRESHOLD:
-                dist_apt.at[i] = f"不得意({cur_cat}苦手傾向)"
+        if same_cat_n >= min_races and diff_cat_n >= min_races:
+            same_rate = same_cat_top3 / same_cat_n
+            diff_rate = diff_cat_top3 / diff_cat_n
+            gap = same_rate - diff_rate
+            is_good = gap >= APTITUDE_DIFF_THRESHOLD and (not strict_rate or same_rate >= 0.7)
+            is_bad = gap <= -APTITUDE_DIFF_THRESHOLD and (not strict_rate or same_rate <= 0.1)
+            if is_good:
+                apt.at[i] = f"得意({cur_cat}好走歴あり)"
+            elif is_bad:
+                apt.at[i] = f"不得意({cur_cat}苦手傾向)"
             else:
-                dist_apt.at[i] = "差なし"
+                apt.at[i] = "差なし"
 
     df.drop(columns=["_is_top3_tmp"], inplace=True)
-    df["horse_distance_aptitude"] = dist_apt
+    df[out_col] = apt
     return df
+
+
+def compute_horse_distance_aptitude(df: pd.DataFrame) -> pd.DataFrame:
+    """馬ごとに、距離区分(短距離/マイル/中距離/長距離)ごとの複勝率を比較し、
+    得意不得意を判定する(horse_distance_aptitude)。
+    """
+    df = df.copy()
+    if "distance" not in df.columns:
+        df["horse_distance_aptitude"] = APTITUDE_UNKNOWN
+        return df
+    df["_dist_cat"] = df["distance"].apply(distance_category)
+    df = _compute_category_aptitude(df, "_dist_cat", "horse_distance_aptitude")
+    df.drop(columns=["_dist_cat"], inplace=True)
+    return df
+
+
+def compute_horse_straight_aptitude(df: pd.DataFrame) -> pd.DataFrame:
+    """馬ごとに、直線の長さ(短い/普通/長い)ごとの複勝率を比較し、
+    得意不得意を判定する(horse_straight_aptitude)。
+
+    直線が長いコースは瞬発力・末脚の切れが問われやすく、短いコースは
+    先行力・持続力が問われやすいと言われるため、その傾向が過去成績に
+    出ているかを見る。
+    """
+    return _compute_category_aptitude(df, "straight_length", "horse_straight_aptitude")
+
+
+def compute_horse_venue_aptitude(df: pd.DataFrame) -> pd.DataFrame:
+    """馬ごとに、競馬場(venue)ごとの複勝率を比較し、得意不得意を判定する
+    (horse_venue_aptitude)。特定の競馬場で好走を重ねている馬を
+    「コース巧者」として評価に反映するため。
+
+    右左回りと同様、サンプル数が少ない偶然での判定を避けるため、
+    3走以上・複勝率そのものが突出している場合だけ判定する厳しい基準を使う。
+    """
+    return _compute_category_aptitude(
+        df, "venue", "horse_venue_aptitude", min_races=3, strict_rate=True,
+    )
 
 
 def compute_pace_note(df: pd.DataFrame) -> pd.DataFrame:
@@ -661,6 +719,8 @@ def load_data(path: str) -> pd.DataFrame:
     df = fill_prev_from_history(df)
     df = compute_horse_course_aptitude(df)
     df = compute_horse_distance_aptitude(df)
+    df = compute_horse_straight_aptitude(df)
+    df = compute_horse_venue_aptitude(df)
     df["gate_sensitive"] = df.apply(
         lambda r: "枠影響大" if is_gate_sensitive_course(r.get("venue"), r.get("distance"), r.get("track_type")) else "通常",
         axis=1,
