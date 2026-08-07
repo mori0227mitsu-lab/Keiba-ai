@@ -1100,6 +1100,7 @@ def main():
             "重複していないかチェックします。パソコンやターミナルは不要です。"
         )
         if st.button("重複をチェックする", key="dup_check_btn"):
+            st.session_state.collision_review_idx = 0
             try:
                 token = st.secrets["github_token"]
                 repo = st.secrets["github_repo"]
@@ -1179,71 +1180,128 @@ def main():
 
             if r["remaining"]:
                 st.markdown("---")
-                st.write(f"**race_id衝突を1件ずつ確認して直す({len(r['remaining'])}件)**")
-                st.caption(
-                    "一括処理は事故の元になったため廃止しました。1件ずつ中身を見て、"
-                    "納得してから反映してください。"
-                )
+                # 件数=2(2レースだけの混在)は分割位置が一意で単純なため、内容を
+                # 一覧で見せた上でまとめて処理できるようにする。件数3以上は
+                # 境界の判断が複雑になりやすく、過去の事故もこちらで起きたと
+                # 考えられるため、引き続き1件ずつ確認する方式にする。
+                simple_ids = [rid for rid, n in r["remaining"] if n == 2]
+                complex_ids = [rid for rid, n in r["remaining"] if n >= 3]
 
-                remaining_ids = [rid for rid, _ in r["remaining"]]
-                if "collision_review_idx" not in st.session_state:
-                    st.session_state.collision_review_idx = 0
-                idx = st.session_state.collision_review_idx
-
-                if idx >= len(remaining_ids):
-                    st.success("✅ 全件確認し終わりました。")
-                else:
-                    rid = remaining_ids[idx]
-                    st.write(f"**{idx + 1} / {len(remaining_ids)}件目: race_id {rid}**")
+                if simple_ids:
+                    st.write(f"**2レース混在のみ、まとめて確認する({len(simple_ids)}件)**")
+                    st.caption("1着が2回出てくる、単純な2分割のケースだけを対象にしています。")
                     df_ref = r["df_dedup"]
-                    group = df_ref[df_ref["race_id"] == rid].copy()
-                    show_cols = [c for c in ["horse_name", "finish_rank", "race_date", "venue", "distance"] if c in group.columns]
-                    st.dataframe(group[show_cols], height=min(400, 40 + 35 * len(group)))
+                    preview_rows = []
+                    next_id_base = int(df_ref["race_id"].max()) + 1000
+                    bulk_plan = {}  # rid -> {horse_name: new_race_id}
+                    for j, rid in enumerate(simple_ids):
+                        group = df_ref[df_ref["race_id"] == rid].sort_index()
+                        current_id = rid
+                        seen_first_winner = False
+                        name_to_new_id = {}
+                        for _, row in group.iterrows():
+                            if row["finish_rank"] == 1:
+                                if seen_first_winner:
+                                    current_id = next_id_base + j
+                                seen_first_winner = True
+                            name_to_new_id[row["horse_name"]] = current_id
+                        bulk_plan[rid] = name_to_new_id
+                        for _, row in group.iterrows():
+                            preview_rows.append({
+                                "元race_id": rid, "馬名": row["horse_name"],
+                                "着順": row["finish_rank"],
+                                "分割後race_id": name_to_new_id[row["horse_name"]],
+                            })
+                    st.dataframe(pd.DataFrame(preview_rows), height=400)
 
-                    # 提案: 1着(finish_rank=1)が出るたびに新しいrace_idに分割する案を表示
-                    proposal = []
-                    next_id_preview = int(df_ref["race_id"].max()) + 1 + idx * 10  # 他の確認中IDと衝突しない目安
-                    current_id = rid
-                    seen_first_winner = False
-                    for _, row in group.iterrows():
-                        if row["finish_rank"] == 1:
-                            if seen_first_winner:
-                                current_id = next_id_preview
-                                next_id_preview += 1
-                            seen_first_winner = True
-                        proposal.append(current_id)
-                    group["提案する新しいrace_id"] = proposal
-                    st.caption("提案(1着が出るたびに新しいIDに分割する案):")
-                    st.dataframe(group[show_cols + ["提案する新しいrace_id"]], height=min(400, 40 + 35 * len(group)))
-
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        if st.button("この提案でOK→反映", key=f"collision_ok_{rid}"):
-                            try:
-                                token = st.secrets["github_token"]
-                                repo = st.secrets["github_repo"]
-                                branch = st.secrets.get("github_branch", "main")
-                                csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
-                                _, current_sha = fetch_csv(token, repo, branch, csv_path)
-                                df_live, _ = fetch_csv(token, repo, branch, csv_path)
+                    if st.button(f"この{len(simple_ids)}件をまとめて反映する", key="bulk_simple_apply"):
+                        try:
+                            token = st.secrets["github_token"]
+                            repo = st.secrets["github_repo"]
+                            branch = st.secrets.get("github_branch", "main")
+                            csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                            df_live, current_sha = fetch_csv(token, repo, branch, csv_path)
+                            for rid, name_to_new_id in bulk_plan.items():
                                 mask = df_live["race_id"] == rid
-                                # インデックスがズレる可能性があるため、行の内容(horse_name)で対応付けする
-                                name_to_new_id = dict(zip(group["horse_name"], proposal))
-                                df_live.loc[mask, "race_id"] = df_live.loc[mask, "horse_name"].map(name_to_new_id).fillna(df_live.loc[mask, "race_id"])
-                                update_csv(
-                                    token, repo, branch, csv_path, df_live, current_sha,
-                                    message=f"race_id {rid} の衝突を手動確認して修復",
+                                df_live.loc[mask, "race_id"] = (
+                                    df_live.loc[mask, "horse_name"].map(name_to_new_id)
+                                    .fillna(df_live.loc[mask, "race_id"])
                                 )
-                                st.success(f"race_id {rid} を反映しました。")
+                            update_csv(
+                                token, repo, branch, csv_path, df_live, current_sha,
+                                message=f"2レース混在の一括修復({len(simple_ids)}件)",
+                            )
+                            st.success(f"{len(simple_ids)}件をまとめて反映しました。数分後にアプリが再起動します。")
+                            del st.session_state.dup_check_result
+                        except Exception as e:
+                            st.error(f"反映に失敗しました: {e}")
+                    st.markdown("---")
+
+                if complex_ids:
+                    st.write(f"**3レース以上混在、1件ずつ確認して直す({len(complex_ids)}件)**")
+                    st.caption(
+                        "3レース以上が混ざっているケースは分割位置の判断が複雑になりやすいため、"
+                        "引き続き1件ずつ中身を見て、納得してから反映してください。"
+                    )
+
+                    remaining_ids = complex_ids
+                    if "collision_review_idx" not in st.session_state:
+                        st.session_state.collision_review_idx = 0
+                    idx = st.session_state.collision_review_idx
+
+                    if idx >= len(remaining_ids):
+                        st.success("✅ 3レース以上混在のケースは全件確認し終わりました。")
+                    else:
+                        rid = remaining_ids[idx]
+                        st.write(f"**{idx + 1} / {len(remaining_ids)}件目: race_id {rid}**")
+                        df_ref = r["df_dedup"]
+                        group = df_ref[df_ref["race_id"] == rid].copy()
+                        show_cols = [c for c in ["horse_name", "finish_rank", "race_date", "venue", "distance"] if c in group.columns]
+                        st.dataframe(group[show_cols], height=min(400, 40 + 35 * len(group)))
+
+                        # 提案: 1着(finish_rank=1)が出るたびに新しいrace_idに分割する案を表示
+                        proposal = []
+                        next_id_preview = int(df_ref["race_id"].max()) + 1 + idx * 10  # 他の確認中IDと衝突しない目安
+                        current_id = rid
+                        seen_first_winner = False
+                        for _, row in group.iterrows():
+                            if row["finish_rank"] == 1:
+                                if seen_first_winner:
+                                    current_id = next_id_preview
+                                    next_id_preview += 1
+                                seen_first_winner = True
+                            proposal.append(current_id)
+                        group["提案する新しいrace_id"] = proposal
+                        st.caption("提案(1着が出るたびに新しいIDに分割する案):")
+                        st.dataframe(group[show_cols + ["提案する新しいrace_id"]], height=min(400, 40 + 35 * len(group)))
+
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            if st.button("この提案でOK→反映", key=f"collision_ok_{rid}"):
+                                try:
+                                    token = st.secrets["github_token"]
+                                    repo = st.secrets["github_repo"]
+                                    branch = st.secrets.get("github_branch", "main")
+                                    csv_path = st.secrets.get("github_csv_path", "data/dummy_races.csv")
+                                    df_live, current_sha = fetch_csv(token, repo, branch, csv_path)
+                                    mask = df_live["race_id"] == rid
+                                    # インデックスがズレる可能性があるため、行の内容(horse_name)で対応付けする
+                                    name_to_new_id = dict(zip(group["horse_name"], proposal))
+                                    df_live.loc[mask, "race_id"] = df_live.loc[mask, "horse_name"].map(name_to_new_id).fillna(df_live.loc[mask, "race_id"])
+                                    update_csv(
+                                        token, repo, branch, csv_path, df_live, current_sha,
+                                        message=f"race_id {rid} の衝突を手動確認して修復",
+                                    )
+                                    st.success(f"race_id {rid} を反映しました。")
+                                    st.session_state.collision_review_idx += 1
+                                    del st.session_state.dup_check_result
+                                except Exception as e:
+                                    st.error(f"反映に失敗しました: {e}")
+                        with col_b:
+                            if st.button("これはスキップ(後で確認)", key=f"collision_skip_{rid}"):
                                 st.session_state.collision_review_idx += 1
-                                del st.session_state.dup_check_result
-                            except Exception as e:
-                                st.error(f"反映に失敗しました: {e}")
-                    with col_b:
-                        if st.button("これはスキップ(後で確認)", key=f"collision_skip_{rid}"):
-                            st.session_state.collision_review_idx += 1
-                    with col_c:
-                        st.caption("提案がおかしい場合はスキップして、直接GitHub上で確認してください。")
+                        with col_c:
+                            st.caption("提案がおかしい場合はスキップして、直接GitHub上で確認してください。")
 
             if r.get("same_race_pairs"):
                 st.markdown("---")
