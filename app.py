@@ -169,10 +169,16 @@ def parse_pasted_csv(text: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def get_horse_full_history(horse_name_query: str) -> pd.DataFrame:
-    """指定した馬名(部分一致)の全レース成績を、時系列順に取得する。
+@st.cache_data
+def _compute_history_with_notes() -> pd.DataFrame:
+    """DATA_PATHの全データに、展開評価・レースタイム水準・相手のレベル評価・
+    距離延長候補の判定をまとめて付与したものをキャッシュして返す。
 
-    展開評価・レースタイム水準・相手のレベル評価・レースレベルもまとめて計算して返す。
+    これらの判定はO(全行数)の重い計算を含むため、馬名検索や前走成績自動入力の
+    ボタンを押すたびに毎回ゼロから計算し直すと、データが増えるほど強く固まる
+    原因になる。DATA_PATHはアプリの実行中に書き換わらない(新しいレースは
+    GitHub経由で追加され、次回の再起動時に反映される)ため、セッション中は
+    1回計算すれば十分。
     """
     if not os.path.exists(DATA_PATH):
         return pd.DataFrame()
@@ -191,6 +197,17 @@ def get_horse_full_history(horse_name_query: str) -> pd.DataFrame:
     hist = compute_stretch_out_note(hist)
     hist = add_chronological_sort_key(hist)
     hist = hist.sort_values("_chron_key")
+    return hist
+
+
+def get_horse_full_history(horse_name_query: str) -> pd.DataFrame:
+    """指定した馬名(部分一致)の全レース成績を、時系列順に取得する。
+
+    展開評価・レースタイム水準・相手のレベル評価・レースレベルもまとめて計算して返す。
+    """
+    hist = _compute_history_with_notes()
+    if hist.empty:
+        return pd.DataFrame()
 
     query_norm = _normalize_name(horse_name_query)
     name_norm = hist["horse_name"].astype(str).apply(_normalize_name)
@@ -438,23 +455,9 @@ def lookup_horse_history() -> pd.DataFrame:
     - latest: horse_nameをキーにした「最新レースだけ」のDataFrame
     - full:   horse_name列を持つ「全レース分」のDataFrame(得意不得意判定用)
     """
-    if not os.path.exists(DATA_PATH):
-        return pd.DataFrame(), pd.DataFrame()
-    hist = pd.read_csv(DATA_PATH)
-    if "horse_name" not in hist.columns:
-        return pd.DataFrame(), pd.DataFrame()
-
-    hist = hist.dropna(subset=["horse_name"])
-    hist = hist[hist["horse_name"].astype(str).str.strip() != ""]
+    hist = _compute_history_with_notes()
     if hist.empty:
         return pd.DataFrame(), pd.DataFrame()
-
-    hist = compute_pace_note(hist)  # 各レース内での展開評価(強い勝ち方/展開不利)を付与
-    hist = compute_race_time_level(hist)  # レースタイムの水準を付与
-    hist = compute_field_strength_note(hist)  # 先着馬のその後の評価を付与
-    hist = compute_stretch_out_note(hist)  # 距離延長で変わるかもの判定を付与
-    hist = add_chronological_sort_key(hist)
-    hist = hist.sort_values("_chron_key")
     latest = hist.groupby("horse_name", as_index=True).tail(1).set_index("horse_name")
     return latest, hist
 
@@ -1908,98 +1911,6 @@ def main():
                 key=f"tweet_text_display_{st.session_state.get('tweet_text_version', 0)}",
             )
             st.caption(f"文字数(概算): {_x_weight(st.session_state.tweet_text)} / 280")
-
-        top3_picks = result.iloc[:3] if len(result) >= 3 else result
-        if len(top3_picks) >= 2:
-            st.markdown("---")
-            section_head("4", "買い目の期待値を計算する")
-            st.caption(
-                "印がついた馬の中から、軸・相手を自由に選んで組み合わせを作れます。"
-                "実際のオッズを入力すると期待値(確率×オッズ)を計算します。単勝オッズはデータに"
-                "ありますが、それ以外の馬券種はオッズが分からないため、購入前にオッズ表アプリなどで"
-                "確認して入力してください。期待値が1.0を超えるほど、理論上「買う価値がある」目安になります。"
-            )
-
-            # 印がついた全馬(◎○▲△△)を選択肢にする
-            marked = result[result["印"] != ""].reset_index(drop=True)
-            option_labels = [f"{row['印']}{row['馬番']}番 {row.get('馬名', '')}".strip() for _, row in marked.iterrows()]
-            win_p_by_label = {
-                label: marked.iloc[i]["勝率(%)"] / 100 for i, label in enumerate(option_labels)
-            }
-            odds_by_label = {
-                label: float(marked.iloc[i].get("オッズ", 0) or 0) for i, label in enumerate(option_labels)
-            }
-            # 印がついていない残り馬の勝率(ワイドの計算に必要)
-            unmarked = result[result["印"] == ""]
-            others_list = (unmarked["勝率(%)"] / 100).tolist() if len(unmarked) else [0.0]
-
-            st.markdown("**単勝**")
-            tansho_choice = st.selectbox("単勝で買う馬", option_labels, key="tansho_choice")
-            bets_input = [{
-                "種類": "単勝", "対象": tansho_choice,
-                "確率": win_p_by_label[tansho_choice], "オッズ": odds_by_label[tansho_choice],
-            }]
-
-            if len(option_labels) >= 2:
-                st.markdown("**馬連・ワイド**(2頭選択)")
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    umaren_pair = st.multiselect(
-                        "組み合わせる2頭", option_labels, default=option_labels[:2],
-                        max_selections=2, key="umaren_pair",
-                    )
-                with col_b:
-                    umaren_odds = st.number_input("馬連オッズ", min_value=0.0, step=0.1, key="umaren_odds_v2")
-                    wide_odds = st.number_input("ワイドオッズ", min_value=0.0, step=0.1, key="wide_odds_v2")
-                if len(umaren_pair) == 2:
-                    pa, pb = win_p_by_label[umaren_pair[0]], win_p_by_label[umaren_pair[1]]
-                    label_pair = f"{umaren_pair[0]}-{umaren_pair[1]}"
-                    bets_input.append({"種類": "馬連", "対象": label_pair, "確率": quinella_proba(pa, pb), "オッズ": umaren_odds})
-                    bets_input.append({"種類": "ワイド", "対象": label_pair, "確率": wide_proba(pa, pb, others_list), "オッズ": wide_odds})
-                else:
-                    st.caption("馬連・ワイドは、ちょうど2頭選んでください。")
-
-            if len(option_labels) >= 3:
-                st.markdown("**三連複**(3頭選択)")
-                sanrenpuku_trio = st.multiselect(
-                    "組み合わせる3頭", option_labels, default=option_labels[:3],
-                    max_selections=3, key="sanrenpuku_trio",
-                )
-                sanrenpuku_odds = st.number_input("三連複オッズ", min_value=0.0, step=0.1, key="sanrenpuku_odds_v2")
-                if len(sanrenpuku_trio) == 3:
-                    pa, pb, pc = (win_p_by_label[n] for n in sanrenpuku_trio)
-                    label_trio = "-".join(sanrenpuku_trio)
-                    bets_input.append({"種類": "三連複", "対象": label_trio, "確率": trio_proba(pa, pb, pc), "オッズ": sanrenpuku_odds})
-                else:
-                    st.caption("三連複は、ちょうど3頭選んでください。")
-
-                st.markdown("**三連単**(着順を指定)")
-                col_1, col_2, col_3 = st.columns(3)
-                with col_1:
-                    santan_1st = st.selectbox("1着", option_labels, key="santan_1st")
-                with col_2:
-                    santan_2nd = st.selectbox("2着", option_labels, index=min(1, len(option_labels) - 1), key="santan_2nd")
-                with col_3:
-                    santan_3rd = st.selectbox("3着", option_labels, index=min(2, len(option_labels) - 1), key="santan_3rd")
-                santan_odds = st.number_input("三連単オッズ", min_value=0.0, step=0.1, key="santan_odds_v2")
-                if len({santan_1st, santan_2nd, santan_3rd}) == 3:
-                    p1, p2, p3 = win_p_by_label[santan_1st], win_p_by_label[santan_2nd], win_p_by_label[santan_3rd]
-                    bets_input.append({
-                        "種類": "三連単", "対象": f"{santan_1st}→{santan_2nd}→{santan_3rd}",
-                        "確率": trifecta_proba(p1, p2, p3), "オッズ": santan_odds,
-                    })
-                else:
-                    st.caption("三連単は、1着・2着・3着に異なる馬を選んでください。")
-
-            ev_result = compute_expected_values(bets_input)
-            ev_df = pd.DataFrame(ev_result)
-            ev_df["確率(%)"] = (ev_df["確率"] * 100).round(2)
-            ev_df = ev_df[["種類", "対象", "確率(%)", "オッズ", "期待値"]]
-            st.dataframe(ev_df, use_container_width=True, hide_index=True)
-            st.caption(
-                "確率はAIの推定(ハーヴィルの公式による近似)なので、あくまで目安です。"
-                "オッズを入力していない馬券種は期待値が空欄のままになります。"
-            )
 
         st.markdown(
             '<div class="disclaimer">⚠️ 本ツールは娯楽・分析目的の予測ツールです。'
