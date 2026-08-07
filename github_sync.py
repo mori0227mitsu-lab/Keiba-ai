@@ -205,12 +205,18 @@ def find_existing_race_ids(
     return matches
 
 
-def get_next_race_id(token: str, repo: str, branch: str, path: str, default: int = 9001) -> int:
-    """既存CSVの最大race_idの次の番号を返す(race_idの重複・手入力ミスを防ぐため)。"""
+def get_next_race_id(token: str, repo: str, branch: str, path: str, default: int = 9001):
+    """既存CSVの最大race_idの次の番号を返す(race_idの重複・手入力ミスを防ぐため)。
+
+    戻り値: (次のrace_id, エラーメッセージ or None)
+    以前はfetch_csv失敗時にエラーを握りつぶしてdefault値を返していたが、
+    これが「1MB超過で取得失敗→気づかずdefault値を使い続け、既存IDと衝突する」
+    という重大な事故の原因になったため、失敗時はその旨を呼び出し元に伝える方式に変更。
+    """
     try:
         df, _ = fetch_csv(token, repo, branch, path)
         if "race_id" in df.columns and len(df):
-            return int(df["race_id"].max()) + 1
-    except Exception:
-        pass
-    return default
+            return int(df["race_id"].max()) + 1, None
+        return default, None
+    except Exception as e:
+        return default, f"既存データの取得に失敗したため、race_idが{default}から始まる可能性があります(既存IDと衝突するおそれ)。エラー: {e}"
