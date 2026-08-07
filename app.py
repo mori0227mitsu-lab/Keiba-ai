@@ -1836,9 +1836,11 @@ def main():
         st.session_state.prediction_result = result
         st.session_state.prediction_pace = predicted_pace
         st.session_state.prediction_ignore_pace = ignore_pace
+        st.session_state.prediction_df = df
 
     if "prediction_result" in st.session_state:
         result = st.session_state.prediction_result
+        df = st.session_state.get("prediction_df", pd.DataFrame())
         section_head("3", "予測結果")
 
         if "prediction_pace" in st.session_state:
@@ -1875,9 +1877,13 @@ def main():
             "ツイートやnote記事にそのままコピペして使えます。"
         )
         if st.button("見解を生成", key="gen_rationale_btn"):
-            prev_extra = st.session_state.get("prev_extra", {})
-            st.session_state.mark_rationale = generate_mark_rationale(result, df, prev_extra)
-            st.session_state.mark_rationale_version = st.session_state.get("mark_rationale_version", 0) + 1
+            try:
+                prev_extra = st.session_state.get("prev_extra", {})
+                st.session_state.mark_rationale = generate_mark_rationale(result, df, prev_extra)
+                st.session_state.mark_rationale_version = st.session_state.get("mark_rationale_version", 0) + 1
+            except Exception as e:
+                st.error(f"見解の生成に失敗しました: {e}")
+                st.exception(e)
         if "mark_rationale" in st.session_state:
             st.text_area(
                 "生成された見解(コピーして使ってください)",
