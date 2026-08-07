@@ -169,11 +169,15 @@ def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("_chron_key").reset_index(drop=True)
 
     note = pd.Series(FIELD_NOTE_NONE, index=df.index)
-    # 馬名ごとの (chron_key, finish_rank) の履歴をあらかじめ作っておく(高速化のため)
-    history_by_name = {
-        name: g[["_chron_key", "finish_rank"]].values
-        for name, g in df.groupby("horse_name")
-    }
+    # 馬名ごとに「掲示板(5着以内)に載ったchron_key」だけを昇順で持っておく。
+    # これにより「このタイミングより後に掲示板があったか」を、全履歴を
+    # 総当たりで調べる(O(履歴数))のではなく、二分探索(O(log 履歴数))で
+    # 判定できるようにする(データが増えるほど遅くなる問題への対策)。
+    import bisect
+    board_chron_by_name = {}
+    for name, g in df.groupby("horse_name"):
+        board_rows = g[g["finish_rank"] <= FIELD_STRENGTH_BOARD_RANK]
+        board_chron_by_name[name] = sorted(board_rows["_chron_key"].tolist())
     has_time = "time_sec" in df.columns
 
     for race_id, g in df.groupby("race_id"):
@@ -192,13 +196,12 @@ def compute_field_strength_note(df: pd.DataFrame) -> pd.DataFrame:
                     if gap > FIELD_STRENGTH_TIME_GAP:
                         continue
 
-                hist = history_by_name.get(arow["horse_name"])
-                if hist is None:
+                board_chrons = board_chron_by_name.get(arow["horse_name"])
+                if not board_chrons:
                     continue
-                future_board = any(
-                    (chron > row["_chron_key"]) and (rank <= FIELD_STRENGTH_BOARD_RANK)
-                    for chron, rank in hist
-                )
+                # row["_chron_key"]より後ろに掲示板実績があるかを二分探索で判定
+                pos = bisect.bisect_right(board_chrons, row["_chron_key"])
+                future_board = pos < len(board_chrons)
                 if future_board:
                     strong_count += 1
 
@@ -257,41 +260,70 @@ def compute_horse_course_aptitude(df: pd.DataFrame) -> pd.DataFrame:
     turn_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
     hill_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
 
-    for _, g in df.groupby("horse_name", sort=False):
-        idx = g.index.tolist()
-        for pos, i in enumerate(idx):
-            past_idx = idx[:pos]
-            if len(past_idx) < 2:
-                continue  # 過去走が少なすぎる場合は判定しない
+    # turn_direction/hillはそれぞれ2値(右/左、坂あり/坂なし)しか取らないため、
+    # 馬ごとに「その値の累積成績」を先に計算しておき、各行では引き算だけで
+    # 「同条件/別条件」の複勝率を求める(過去走を毎回総当たりし直すO(k^2)を
+    # O(k)の累積和に置き換えて高速化する)。
+    is_right = (df["turn_direction"] == "右").astype(int)
+    is_hill = (df["hill"] == "坂あり").astype(int)
 
-            cur_turn = df.at[i, "turn_direction"]
-            cur_hill = df.at[i, "hill"]
-            past_turn = df.loc[past_idx, "turn_direction"]
-            past_hill = df.loc[past_idx, "hill"]
-            past_top3 = is_top3.loc[past_idx]
+    grp = df.groupby("horse_name", sort=False)
+    # 「このレースより前」の累積値にするため、cumsumしてから1行シフトする
+    cum_total = grp.cumcount()  # そのレースより前に何走あるか
+    # is_top3はSeriesなのでgroupby用に一時列として持たせる
+    df["_is_top3_tmp"] = is_top3
+    df["_is_right_tmp"] = is_right
+    df["_is_hill_tmp"] = is_hill
+    grp2 = df.groupby("horse_name", sort=False)
+    cum_top3_before = grp2["_is_top3_tmp"].cumsum() - df["_is_top3_tmp"]
+    cum_right_before = grp2["_is_right_tmp"].cumsum() - df["_is_right_tmp"]
+    cum_right_top3_before = grp2.apply(
+        lambda g: (g["_is_top3_tmp"] * g["_is_right_tmp"]).cumsum() - g["_is_top3_tmp"] * g["_is_right_tmp"]
+    ).reset_index(level=0, drop=True).sort_index()
+    cum_hill_before = grp2["_is_hill_tmp"].cumsum() - df["_is_hill_tmp"]
+    cum_hill_top3_before = grp2.apply(
+        lambda g: (g["_is_top3_tmp"] * g["_is_hill_tmp"]).cumsum() - g["_is_top3_tmp"] * g["_is_hill_tmp"]
+    ).reset_index(level=0, drop=True).sort_index()
 
-            same_turn = past_top3[past_turn == cur_turn]
-            diff_turn = past_top3[past_turn != cur_turn]
-            if len(same_turn) >= 1 and len(diff_turn) >= 1:
-                gap = same_turn.mean() - diff_turn.mean()
-                if gap >= APTITUDE_DIFF_THRESHOLD:
-                    turn_apt.at[i] = f"得意({cur_turn}回り好走歴あり)"
-                elif gap <= -APTITUDE_DIFF_THRESHOLD:
-                    turn_apt.at[i] = f"不得意({cur_turn}回り苦手傾向)"
-                else:
-                    turn_apt.at[i] = "差なし"
+    total_before = cum_total
+    total_top3_before = cum_top3_before
 
-            same_hill = past_top3[past_hill == cur_hill]
-            diff_hill = past_top3[past_hill != cur_hill]
-            if len(same_hill) >= 1 and len(diff_hill) >= 1:
-                gap = same_hill.mean() - diff_hill.mean()
-                if gap >= APTITUDE_DIFF_THRESHOLD:
-                    hill_apt.at[i] = f"得意({cur_hill}好走歴あり)"
-                elif gap <= -APTITUDE_DIFF_THRESHOLD:
-                    hill_apt.at[i] = f"不得意({cur_hill}苦手傾向)"
-                else:
-                    hill_apt.at[i] = "差なし"
+    for i in df.index:
+        n_before = total_before.at[i]
+        if n_before < 2:
+            continue
 
+        cur_turn = df.at[i, "turn_direction"]
+        same_turn_n = cum_right_before.at[i] if cur_turn == "右" else (n_before - cum_right_before.at[i])
+        same_turn_top3 = cum_right_top3_before.at[i] if cur_turn == "右" else (total_top3_before.at[i] - cum_right_top3_before.at[i])
+        diff_turn_n = n_before - same_turn_n
+        diff_turn_top3 = total_top3_before.at[i] - same_turn_top3
+
+        if same_turn_n >= 1 and diff_turn_n >= 1:
+            gap = (same_turn_top3 / same_turn_n) - (diff_turn_top3 / diff_turn_n)
+            if gap >= APTITUDE_DIFF_THRESHOLD:
+                turn_apt.at[i] = f"得意({cur_turn}回り好走歴あり)"
+            elif gap <= -APTITUDE_DIFF_THRESHOLD:
+                turn_apt.at[i] = f"不得意({cur_turn}回り苦手傾向)"
+            else:
+                turn_apt.at[i] = "差なし"
+
+        cur_hill = df.at[i, "hill"]
+        same_hill_n = cum_hill_before.at[i] if cur_hill == "坂あり" else (n_before - cum_hill_before.at[i])
+        same_hill_top3 = cum_hill_top3_before.at[i] if cur_hill == "坂あり" else (total_top3_before.at[i] - cum_hill_top3_before.at[i])
+        diff_hill_n = n_before - same_hill_n
+        diff_hill_top3 = total_top3_before.at[i] - same_hill_top3
+
+        if same_hill_n >= 1 and diff_hill_n >= 1:
+            gap = (same_hill_top3 / same_hill_n) - (diff_hill_top3 / diff_hill_n)
+            if gap >= APTITUDE_DIFF_THRESHOLD:
+                hill_apt.at[i] = f"得意({cur_hill}好走歴あり)"
+            elif gap <= -APTITUDE_DIFF_THRESHOLD:
+                hill_apt.at[i] = f"不得意({cur_hill}苦手傾向)"
+            else:
+                hill_apt.at[i] = "差なし"
+
+    df.drop(columns=["_is_top3_tmp", "_is_right_tmp", "_is_hill_tmp"], inplace=True)
     df["horse_turn_aptitude"] = turn_apt
     df["horse_hill_aptitude"] = hill_apt
     return df
@@ -389,28 +421,49 @@ def compute_horse_distance_aptitude(df: pd.DataFrame) -> pd.DataFrame:
 
     dist_apt = pd.Series(APTITUDE_UNKNOWN, index=df.index)
 
-    for _, g in df.groupby("horse_name", sort=False):
-        idx = g.index.tolist()
-        for pos, i in enumerate(idx):
-            past_idx = idx[:pos]
-            if len(past_idx) < 2:
-                continue
+    # 距離区分は4種類しかないため、区分ごとのone-hot列を作り、馬ごとの
+    # 累積和(そのレースより前の分)を先に計算しておく。これにより、
+    # 各行では引き算だけで「同区分/別区分」の複勝率を求められる
+    # (過去走を毎回総当たりし直すO(k^2)をO(k)に置き換えて高速化)。
+    df["_is_top3_tmp"] = is_top3
+    categories = df["_dist_cat"].unique()
+    grp = df.groupby("horse_name", sort=False)
+    cum_total_before = grp.cumcount()
+    cum_top3_before = grp["_is_top3_tmp"].cumsum() - df["_is_top3_tmp"]
 
-            cur_cat = df.at[i, "_dist_cat"]
-            past_cat = df.loc[past_idx, "_dist_cat"]
-            past_top3 = is_top3.loc[past_idx]
+    cat_total_before = {}
+    cat_top3_before = {}
+    for cat in categories:
+        is_cat = (df["_dist_cat"] == cat).astype(int)
+        df["_is_cat_tmp"] = is_cat
+        g2 = df.groupby("horse_name", sort=False)
+        cat_total_before[cat] = g2["_is_cat_tmp"].cumsum() - df["_is_cat_tmp"]
+        cat_top3_before[cat] = g2.apply(
+            lambda g: (g["_is_top3_tmp"] * g["_is_cat_tmp"]).cumsum() - g["_is_top3_tmp"] * g["_is_cat_tmp"]
+        ).reset_index(level=0, drop=True).sort_index()
+    df.drop(columns=["_is_cat_tmp"], inplace=True)
 
-            same_cat = past_top3[past_cat == cur_cat]
-            diff_cat = past_top3[past_cat != cur_cat]
-            if len(same_cat) >= 1 and len(diff_cat) >= 1:
-                gap = same_cat.mean() - diff_cat.mean()
-                if gap >= APTITUDE_DIFF_THRESHOLD:
-                    dist_apt.at[i] = f"得意({cur_cat}好走歴あり)"
-                elif gap <= -APTITUDE_DIFF_THRESHOLD:
-                    dist_apt.at[i] = f"不得意({cur_cat}苦手傾向)"
-                else:
-                    dist_apt.at[i] = "差なし"
+    for i in df.index:
+        n_before = cum_total_before.at[i]
+        if n_before < 2:
+            continue
 
+        cur_cat = df.at[i, "_dist_cat"]
+        same_cat_n = cat_total_before[cur_cat].at[i]
+        same_cat_top3 = cat_top3_before[cur_cat].at[i]
+        diff_cat_n = n_before - same_cat_n
+        diff_cat_top3 = cum_top3_before.at[i] - same_cat_top3
+
+        if same_cat_n >= 1 and diff_cat_n >= 1:
+            gap = (same_cat_top3 / same_cat_n) - (diff_cat_top3 / diff_cat_n)
+            if gap >= APTITUDE_DIFF_THRESHOLD:
+                dist_apt.at[i] = f"得意({cur_cat}好走歴あり)"
+            elif gap <= -APTITUDE_DIFF_THRESHOLD:
+                dist_apt.at[i] = f"不得意({cur_cat}苦手傾向)"
+            else:
+                dist_apt.at[i] = "差なし"
+
+    df.drop(columns=["_is_top3_tmp"], inplace=True)
     df["horse_distance_aptitude"] = dist_apt
     return df
 
@@ -687,13 +740,14 @@ def build_features(df: pd.DataFrame, encoders: dict | None = None):
         else:
             le = encoders[col]
 
-        def safe_transform(v, le=le):
-            v = str(v)
-            if v not in le.classes_:
-                v = "UNK"
-            return le.transform([v])[0]
-
-        df[col] = df[col].apply(safe_transform)
+        # le.transform()を1行ずつ呼ぶと(sklearn内部のバリデーション等の
+        # オーバーヘッドが毎回発生するため)データが増えるほど極端に遅くなる。
+        # クラス→数値のdictを作って.map()する方式に置き換えて高速化する。
+        class_to_idx = {cls: i for i, cls in enumerate(le.classes_)}
+        str_col = df[col].astype(str)
+        known_mask = str_col.isin(le.classes_)
+        safe_col = str_col.where(known_mask, "UNK")
+        df[col] = safe_col.map(class_to_idx)
 
     X = df[FEATURE_COLS]
     # 想定外の欠損値(NaN)が残っていると学習時にエラーになるため、最後に必ず0で埋める
