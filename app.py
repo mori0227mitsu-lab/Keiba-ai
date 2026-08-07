@@ -25,7 +25,8 @@ from model.train_model import (
     STRETCH_OUT_NOTE_NONE, compute_stretch_out_note,
     quinella_proba, wide_proba, trio_proba, trifecta_proba, compute_expected_values,
     distance_category, compute_horse_distance_aptitude,
-    PACE_NOTE_LEADER_GRIT, PACE_NOTE_LEADER_STRONG_RACE,
+    PACE_NOTE_LEADER_GRIT, PACE_NOTE_LEADER_STRONG_RACE, PACE_NOTE_CLOSER_UNLUCKY,
+    FIELD_NOTE_STRONG,
     estimate_race_pace, pace_style_fit, RACE_PACE_MIDDLE,
     derive_probas,
 )
@@ -224,6 +225,100 @@ def _x_weight(text: str) -> int:
     return total
 
 
+def _describe_horse_qualities(pace_fit: str, race_pace: str, extra: dict) -> list:
+    """脚質相性・展開評価・各種適性など、定性的な情報を文章の断片(リスト)にする。
+
+    数字(複勝率・勝率・オッズなど)は一切使わず、「なぜその印なのか」を
+    言葉で説明するための材料集め。値が「特になし/データ不足/差なし」の
+    項目は、判断材料にならないため除外する。
+    """
+    parts = []
+    extra = extra or {}
+
+    if pace_fit == "有利":
+        parts.append(f"想定{race_pace}ペースとの相性が良く")
+    elif pace_fit == "不利":
+        parts.append(f"想定{race_pace}ペースはやや向かい風ながら")
+
+    field_note = extra.get("prev_field_strength_note", FIELD_NOTE_NONE)
+    if field_note == FIELD_NOTE_STRONG:
+        parts.append("前走で先着した馬たちがその後も好走しており相手のレベルは高かった")
+
+    pace_note = extra.get("prev_pace_note", PACE_NOTE_NONE)
+    if pace_note == PACE_NOTE_LEADER_GRIT:
+        parts.append("前走は先行して押し切る強い勝ち方")
+    elif pace_note == PACE_NOTE_LEADER_STRONG_RACE:
+        parts.append("前走は苦しい展開でも僅差の好走")
+    elif pace_note == PACE_NOTE_CLOSER_UNLUCKY:
+        parts.append("前走は上がり最速ながら展開に恵まれず掲示板を外した")
+
+    stretch_note = extra.get("prev_stretch_out_note", STRETCH_OUT_NOTE_NONE)
+    if stretch_note and stretch_note != STRETCH_OUT_NOTE_NONE:
+        parts.append("今回の距離延長で上積みが期待できる")
+
+    for key, label in [
+        ("horse_turn_aptitude", "回り"), ("horse_hill_aptitude", "坂"),
+        ("horse_distance_aptitude", "距離"), ("horse_straight_aptitude", "直線"),
+        ("horse_venue_aptitude", "このコース"),
+    ]:
+        val = extra.get(key, APTITUDE_UNKNOWN)
+        if isinstance(val, str) and val.startswith("得意"):
+            parts.append(f"{label}への適性も高い")
+        elif isinstance(val, str) and val.startswith("不得意"):
+            parts.append(f"{label}はやや苦手な傾向がある")
+
+    return parts
+
+
+def generate_mark_rationale(result: pd.DataFrame, df: pd.DataFrame, prev_extra: dict) -> str:
+    """予測結果の◎○▲△⭐それぞれについて、「なぜその印なのか」を
+    複勝率・勝率・オッズなどの数字を使わずに、言葉で説明する文章を作る。
+    ツイートやnote記事にそのまま使えるよう、コピペしやすい形式にする。
+    """
+    name_col = "馬名" if "馬名" in result.columns else "horse_name"
+    num_col = "馬番" if "馬番" in result.columns else "horse_num"
+    style_col = "脚質" if "脚質" in result.columns else "running_style"
+    eval_col = "評価" if "評価" in result.columns else None
+
+    # running_style/race_pace/pace_fitは元のdfから馬名で引けるようにしておく
+    pace_lookup = {}
+    if "horse_name" in df.columns and "pace_fit" in df.columns:
+        for _, row in df.iterrows():
+            pace_lookup[row["horse_name"]] = {
+                "pace_fit": row.get("pace_fit", "五分"),
+                "race_pace": row.get("race_pace", ""),
+            }
+
+    lines = []
+    for mark in ["◎", "○", "▲", "△", "⭐"]:
+        rows = result[result["印"] == mark]
+        for _, r in rows.iterrows():
+            name = r[name_col]
+            num = r[num_col]
+            style = r.get(style_col, "")
+            pace_info = pace_lookup.get(name, {})
+            extra = prev_extra.get(name, {})
+            parts = _describe_horse_qualities(
+                pace_info.get("pace_fit", "五分"), pace_info.get("race_pace", ""), extra,
+            )
+
+            eval_label = r.get(eval_col) if eval_col else None
+            if eval_label == "妙味大":
+                parts.append("人気の割に評価を大きく上げた")
+            elif eval_label == "妙味あり":
+                parts.append("人気の割に評価をやや上げた")
+            elif eval_label == "過剰人気":
+                parts.append("人気ほどではないと判断した")
+
+            if not parts:
+                body = f"脚質({style})やレース条件との相性を総合的に見て評価しました。"
+            else:
+                body = "、".join(parts) + "、と判断しました。"
+            lines.append(f"{mark}{num}{name}: {body}")
+
+    return "\n".join(lines)
+
+
 def generate_tweet_text(result: pd.DataFrame, race_label: str = "") -> str:
     """予測結果(印付きのDataFrame)から、そのままXに貼れるツイート文を作る。
 
@@ -391,34 +486,42 @@ def _typical_running_style(name_hist: pd.DataFrame):
     return top_styles.pop()
 
 
-def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current_hill: str, current_distance=None):
-    """ある馬の全過去成績から、今回のレース条件(右左回り・坂・距離区分)との
-    得意不得意を判定する。
+def compute_current_aptitude(
+    name_hist: pd.DataFrame, current_turn: str, current_hill: str,
+    current_distance=None, current_straight_length=None, current_venue=None,
+):
+    """ある馬の全過去成績から、今回のレース条件(右左回り・坂・距離区分・
+    直線の長さ・競馬場)との得意不得意を判定する。
 
     予測対象のレースはまだ走っていないので、その馬の「これまでの全成績」を使って良い
-    (学習時のcompute_horse_course_aptitude/compute_horse_distance_aptitudeとは違い、
-    未来のデータリークの心配は無い)。
+    (学習時のcompute_horse_course_aptitude等とは違い、未来のデータリークの心配は無い)。
     """
     if name_hist.empty or "venue" not in name_hist.columns or "finish_rank" not in name_hist.columns:
-        return APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        return APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
 
     turns = name_hist["venue"].map(COURSE_TURN).fillna("右")
     hills = name_hist["venue"].map(COURSE_HILL).fillna("坂なし")
     top3 = (name_hist["finish_rank"] <= 3).astype(int)
 
-    def _judge(same_mask, diff_mask, label):
+    def _judge(same_mask, diff_mask, label, min_n=1, strict_rate=False):
         same = top3[same_mask]
         diff = top3[diff_mask]
-        if len(same) < 1 or len(diff) < 1:
+        if len(same) < min_n or len(diff) < min_n:
             return APTITUDE_UNKNOWN
-        gap = same.mean() - diff.mean()
-        if gap >= 0.34:
+        same_rate = same.mean()
+        diff_rate = diff.mean()
+        gap = same_rate - diff_rate
+        is_good = gap >= 0.34 and (not strict_rate or same_rate >= 0.7)
+        is_bad = gap <= -0.34 and (not strict_rate or same_rate <= 0.1)
+        if is_good:
             return f"得意({label}好走歴あり)"
-        if gap <= -0.34:
+        if is_bad:
             return f"不得意({label}苦手傾向)"
         return "差なし"
 
-    turn_apt = _judge(turns == current_turn, turns != current_turn, f"{current_turn}回り")
+    # 右左回り・競馬場適性は、サンプル数が少ない偶然での判定を避けるため、
+    # 3走以上・複勝率そのものが突出している場合だけ判定する厳しい基準にする。
+    turn_apt = _judge(turns == current_turn, turns != current_turn, f"{current_turn}回り", min_n=3, strict_rate=True)
     hill_apt = _judge(hills == current_hill, hills != current_hill, current_hill)
 
     dist_apt = APTITUDE_UNKNOWN
@@ -427,7 +530,21 @@ def compute_current_aptitude(name_hist: pd.DataFrame, current_turn: str, current
         cur_cat = distance_category(current_distance)
         dist_apt = _judge(cats == cur_cat, cats != cur_cat, cur_cat)
 
-    return turn_apt, hill_apt, dist_apt
+    straight_apt = APTITUDE_UNKNOWN
+    if current_straight_length is not None:
+        straights = name_hist["venue"].map(COURSE_STRAIGHT_LENGTH).fillna("普通")
+        straight_apt = _judge(
+            straights == current_straight_length, straights != current_straight_length, current_straight_length,
+        )
+
+    venue_apt = APTITUDE_UNKNOWN
+    if current_venue is not None:
+        venue_apt = _judge(
+            name_hist["venue"] == current_venue, name_hist["venue"] != current_venue, current_venue,
+            min_n=3, strict_rate=True,
+        )
+
+    return turn_apt, hill_apt, dist_apt, straight_apt, venue_apt
 
 
 def _normalize_name(name: str) -> str:
@@ -438,6 +555,7 @@ def _normalize_name(name: str) -> str:
 def apply_horse_history(
     df: pd.DataFrame, history: pd.DataFrame, full_history: pd.DataFrame,
     current_turn: str, current_hill: str, current_distance=None,
+    current_straight_length=None, current_venue=None,
 ):
     """出走馬テーブルのhorse_nameを使って前走成績(prev_rank)を自動入力する。
 
@@ -493,11 +611,13 @@ def apply_horse_history(
         if pd.notna(typical_style) and typical_style in RUNNING_STYLES and "running_style" in df.columns:
             df.at[i, "running_style"] = typical_style
 
-        # この馬の全過去成績から、今回のコース条件・距離との得意不得意を判定
+        # この馬の全過去成績から、今回のコース条件・距離・直線・競馬場との得意不得意を判定
         turn_apt, hill_apt, dist_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
+        straight_apt, venue_apt = APTITUDE_UNKNOWN, APTITUDE_UNKNOWN
         if not name_hist.empty:
-            turn_apt, hill_apt, dist_apt = compute_current_aptitude(
-                name_hist, current_turn, current_hill, current_distance
+            turn_apt, hill_apt, dist_apt, straight_apt, venue_apt = compute_current_aptitude(
+                name_hist, current_turn, current_hill, current_distance,
+                current_straight_length, current_venue,
             )
 
         extra[raw_name] = {
@@ -512,6 +632,8 @@ def apply_horse_history(
             "horse_turn_aptitude": turn_apt,
             "horse_hill_aptitude": hill_apt,
             "horse_distance_aptitude": dist_apt,
+            "horse_straight_aptitude": straight_apt,
+            "horse_venue_aptitude": venue_apt,
         }
     return df, matched, extra, unmatched_suggestions
 
@@ -1523,7 +1645,8 @@ def main():
             st.session_state.autofill_suggestions = {}
         else:
             updated, matched, extra, suggestions = apply_horse_history(
-                edited, history, full_history, turn_direction, hill, distance
+                edited, history, full_history, turn_direction, hill, distance,
+                straight_length, venue,
             )
             st.session_state.horse_df = updated
             st.session_state.horse_table_version += 1
@@ -1541,6 +1664,10 @@ def main():
                     parts.append(f"坂適性: {e['horse_hill_aptitude']}")
                 if e.get("horse_distance_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
                     parts.append(f"距離適性: {e['horse_distance_aptitude']}")
+                if e.get("horse_straight_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
+                    parts.append(f"直線適性: {e['horse_straight_aptitude']}")
+                if e.get("horse_venue_aptitude", APTITUDE_UNKNOWN) not in (APTITUDE_UNKNOWN, "差なし"):
+                    parts.append(f"競馬場適性: {e['horse_venue_aptitude']}")
                 if parts:
                     notes[n] = " / ".join(parts)
             st.session_state.autofill_notes = notes
@@ -1605,6 +1732,8 @@ def main():
         df["horse_turn_aptitude"] = APTITUDE_UNKNOWN
         df["horse_hill_aptitude"] = APTITUDE_UNKNOWN
         df["horse_distance_aptitude"] = APTITUDE_UNKNOWN
+        df["horse_straight_aptitude"] = APTITUDE_UNKNOWN
+        df["horse_venue_aptitude"] = APTITUDE_UNKNOWN
         if prev_extra and "horse_name" in df.columns:
             for i, row in df.iterrows():
                 name = str(row.get("horse_name", "")).strip()
@@ -1740,6 +1869,23 @@ def main():
         )
 
         st.markdown("---")
+        section_head("📝", "印の見解")
+        st.caption(
+            "複勝率・勝率・オッズなどの数字を使わず、なぜその印にしたかを言葉で説明します。"
+            "ツイートやnote記事にそのままコピペして使えます。"
+        )
+        if st.button("見解を生成", key="gen_rationale_btn"):
+            prev_extra = st.session_state.get("prev_extra", {})
+            st.session_state.mark_rationale = generate_mark_rationale(result, df, prev_extra)
+            st.session_state.mark_rationale_version = st.session_state.get("mark_rationale_version", 0) + 1
+        if "mark_rationale" in st.session_state:
+            st.text_area(
+                "生成された見解(コピーして使ってください)",
+                value=st.session_state.mark_rationale, height=250,
+                key=f"mark_rationale_display_{st.session_state.get('mark_rationale_version', 0)}",
+            )
+
+        st.markdown("---")
         section_head("🐦", "ツイート文を作る")
         race_label = st.text_input(
             "レース名(【】の中に入る文字。空欄でもOK)",
@@ -1748,10 +1894,12 @@ def main():
         )
         if st.button("ツイート文を生成", key="gen_tweet_btn"):
             st.session_state.tweet_text = generate_tweet_text(result, race_label)
+            st.session_state.tweet_text_version = st.session_state.get("tweet_text_version", 0) + 1
         if "tweet_text" in st.session_state:
             st.text_area(
                 "生成されたツイート文(コピーしてXに貼ってください)",
-                value=st.session_state.tweet_text, height=180, key="tweet_text_display",
+                value=st.session_state.tweet_text, height=180,
+                key=f"tweet_text_display_{st.session_state.get('tweet_text_version', 0)}",
             )
             st.caption(f"文字数(概算): {_x_weight(st.session_state.tweet_text)} / 280")
 
