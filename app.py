@@ -242,20 +242,34 @@ def _x_weight(text: str) -> int:
     return total
 
 
-def _describe_horse_qualities(pace_fit: str, race_pace: str, extra: dict) -> list:
+def _describe_horse_qualities(pace_fit: str, race_pace: str, extra: dict, running_style: str = "") -> list:
     """脚質相性・展開評価・各種適性など、定性的な情報を文章の断片(リスト)にする。
 
     数字(複勝率・勝率・オッズなど)は一切使わず、「なぜその印なのか」を
     言葉で説明するための材料集め。値が「特になし/データ不足/差なし」の
     項目は、判断材料にならないため除外する。
+
+    前走の成績が無い馬(新馬など)は、展開評価・相手レベル・各種適性が
+    すべて「データ無し」になるため、そのままでは材料が0件になってしまう。
+    その場合は、脚質とペースの相性(pace_fit)を主な判断材料として使う
+    (「五分」であっても、脚質とペースの関係を一言添える)。
     """
     parts = []
     extra = extra or {}
+
+    is_debut = not extra or all(
+        v in (PACE_NOTE_NONE, FIELD_NOTE_NONE, STRETCH_OUT_NOTE_NONE, APTITUDE_UNKNOWN, 0, "", None)
+        for v in extra.values()
+    )
 
     if pace_fit == "有利":
         parts.append(f"想定{race_pace}ペースとの相性が良く")
     elif pace_fit == "不利":
         parts.append(f"想定{race_pace}ペースはやや向かい風ながら")
+    elif is_debut and race_pace and running_style:
+        # 前走データが無い馬は、他に判断材料が無いため、ペースと脚質の
+        # 組み合わせだけで一言評価する(五分でも材料として使う)
+        parts.append(f"前走データが無いため、想定{race_pace}ペースと{running_style}という脚質の組み合わせを中心に評価しており")
 
     field_note = extra.get("prev_field_strength_note", FIELD_NOTE_NONE)
     if field_note == FIELD_NOTE_STRONG:
@@ -316,21 +330,27 @@ def generate_mark_rationale(result: pd.DataFrame, df: pd.DataFrame, prev_extra: 
             pace_info = pace_lookup.get(name, {})
             extra = prev_extra.get(name, {})
             parts = _describe_horse_qualities(
-                pace_info.get("pace_fit", "五分"), pace_info.get("race_pace", ""), extra,
+                pace_info.get("pace_fit", "五分"), pace_info.get("race_pace", ""), extra, style,
             )
 
             eval_label = r.get(eval_col) if eval_col else None
+            conclusion = None
             if eval_label == "妙味大":
-                parts.append("人気の割に評価を大きく上げた")
+                conclusion = "市場の人気(オッズ)よりもAIの評価の方がかなり高くなっています"
             elif eval_label == "妙味あり":
-                parts.append("人気の割に評価をやや上げた")
+                conclusion = "市場の人気(オッズ)よりもAIの評価の方が高くなっています"
             elif eval_label == "過剰人気":
-                parts.append("人気ほどではないと判断した")
+                conclusion = "市場の人気(オッズ)の方がAIの評価よりも高く、支持されすぎている可能性があります"
 
-            if not parts:
+            if not parts and not conclusion:
                 body = f"脚質({style})やレース条件との相性を総合的に見て評価しました。"
-            else:
+            elif parts and conclusion:
+                # 理由(展開評価・適性など)→結論(AI評価と市場人気のズレ)の順につなげる
+                body = "、".join(parts) + "といった点から、" + conclusion + "。"
+            elif parts:
                 body = "、".join(parts) + "、と判断しました。"
+            else:
+                body = conclusion + "。"
             lines.append(f"{mark}{num}{name}: {body}")
 
     return "\n".join(lines)
@@ -1750,6 +1770,28 @@ def main():
         # 「勝率が複勝率を上回る」という矛盾は起きようがない。
         proba, win_proba = derive_probas(bundle["model"], X)
 
+        # 「なぜその印なのか」を言葉で説明できる材料(展開評価・適性・ペース相性など)が
+        # 何も無い馬は、印の対象から外す(数字だけで印をつけることを避けるため)。
+        # 「馬名から前走成績を自動入力」をしていない馬は、ここが全てFalseになる。
+        has_reason_list = []
+        for _, row in df.iterrows():
+            reason_parts = _describe_horse_qualities(
+                row.get("pace_fit", "五分"), row.get("race_pace", ""),
+                {
+                    "prev_field_strength_note": row.get("field_strength_note", FIELD_NOTE_NONE),
+                    "prev_pace_note": row.get("prev_pace_note", PACE_NOTE_NONE),
+                    "prev_stretch_out_note": row.get("prev_stretch_out_note", STRETCH_OUT_NOTE_NONE),
+                    "horse_turn_aptitude": row.get("horse_turn_aptitude", APTITUDE_UNKNOWN),
+                    "horse_hill_aptitude": row.get("horse_hill_aptitude", APTITUDE_UNKNOWN),
+                    "horse_distance_aptitude": row.get("horse_distance_aptitude", APTITUDE_UNKNOWN),
+                    "horse_straight_aptitude": row.get("horse_straight_aptitude", APTITUDE_UNKNOWN),
+                    "horse_venue_aptitude": row.get("horse_venue_aptitude", APTITUDE_UNKNOWN),
+                },
+                row.get("running_style", ""),
+            )
+            has_reason_list.append(len(reason_parts) > 0)
+        has_reason_mask = pd.Series(has_reason_list, index=df.index).values
+
         # ただし、この時点の値は「馬1頭ごとに独立」に計算したものなので、
         # レース全体で見た時に「勝率の合計が100%(1着になる馬は必ず1頭)」
         # 「複勝率の合計が300%(3着以内に入る馬は必ず3頭)」になる保証が無い。
@@ -1778,12 +1820,18 @@ def main():
         # 単勝期待値をそのまま総合スコアとして使う(参考表示・◎の決定に使う)
         result["総合スコア"] = result["単勝期待値"]
 
-        # 複勝確率が最低ライン(min_proba_for_mark)を下回る馬は「足切り」対象。
-        # 極端な人気薄は勝率の推定自体が不安定で、期待値の数字だけが
-        # 偶然大きく出てしまうことがあるための対策。
-        eligible_mask = (result["複勝確率(%)"] >= min_proba_for_mark).values
+        # 複勝確率が最低ライン(min_proba_for_mark)を下回る馬、および
+        # 「なぜその印か」を説明できる材料が無い馬は「足切り」対象。
+        eligible_mask = (result["複勝確率(%)"] >= min_proba_for_mark).values & has_reason_mask
         eligible = result[eligible_mask].copy()
         ineligible = result[~eligible_mask].copy()
+
+        if not has_reason_mask.any():
+            st.warning(
+                "⚠️ どの馬にも「見解の材料」(展開評価・適性など)が見つからなかったため、"
+                "印がつきませんでした。上の「馬名から前走成績を自動入力」を実行してから、"
+                "もう一度予測してください。"
+            )
 
         marks_map = {}  # 元のindex -> 印
 
@@ -1808,8 +1856,12 @@ def main():
                 else:
                     break  # 複勝確率順なので、ラインを割ったらそれ以降も全て割る
 
-        # ⭐: 足切りされた馬の中で、単勝期待値が「穴ライン」を超えた馬は全員(頭数は可変)
-        for idx, row in ineligible.iterrows():
+        # ⭐: 足切りされた馬の中で、複勝確率は低いが材料(理由)はあり、
+        # 単勝期待値が「穴ライン」を超えた馬は全員(頭数は可変)。
+        # 材料が無くて足切りされた馬は、⭐でも拾わない(印には必ず理由が必要)。
+        low_proba_but_has_reason = (result["複勝確率(%)"] < min_proba_for_mark).values & has_reason_mask
+        star_candidates = result[low_proba_but_has_reason]
+        for idx, row in star_candidates.iterrows():
             if row["総合スコア"] >= ana_line:
                 marks_map[idx] = "⭐"
 
